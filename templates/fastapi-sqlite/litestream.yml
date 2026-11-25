@@ -1,0 +1,5 @@
+dbs:
+  - path: /data/app.db
+    replicas:
+      - url: gs://smallcloud-replicas/org-indie-default/fastapi-starter
+        sync-interval: 1s
