@@ -7,9 +7,8 @@ import (
 	"strconv"
 )
 
-const cgroupPeriodMicros = 100000 // 100ms standard Linux CFS period
+const cgroupPeriodMicros = 100000
 
-// CgroupLimits represents the Linux cgroups v2 resource limits applied to a container.
 type CgroupLimits struct {
 	OrgID      string `json:"org_id"`
 	AppName    string `json:"app_name"`
@@ -19,7 +18,6 @@ type CgroupLimits struct {
 	CgroupPath string `json:"cgroup_path"`
 }
 
-// CgroupManager writes Linux cgroups v2 limits (cpu.max, memory.max) under a root directory.
 type CgroupManager struct {
 	rootDir string
 }
@@ -28,7 +26,6 @@ func NewCgroupManager(rootDir string) *CgroupManager {
 	return &CgroupManager{rootDir: rootDir}
 }
 
-// Apply creates the tenant-scoped cgroup v2 directory and writes cpu.max and memory.max.
 func (m *CgroupManager) Apply(orgID, appName string, cpuMillicores, memoryMB int) (*CgroupLimits, error) {
 	if cpuMillicores < 100 {
 		return nil, fmt.Errorf("cpuMillicores must be >= 100, got %d", cpuMillicores)

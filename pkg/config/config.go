@@ -14,7 +14,6 @@ import (
 
 var validSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]{1,62}$`)
 
-// Config represents the parsed and validated smallcloud.toml configuration.
 type Config struct {
 	App       AppConfig       `json:"app"`
 	Resources ResourcesConfig `json:"resources"`
@@ -48,7 +47,6 @@ type StorageConfig struct {
 	SyncMs     int    `json:"sync_ms"`
 }
 
-// LoadFile reads and parses a smallcloud.toml file from disk.
 func LoadFile(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -60,7 +58,6 @@ func LoadFile(path string) (*Config, error) {
 	return Parse(f)
 }
 
-// Parse parses a smallcloud.toml reader and validates all security and budget invariants.
 func Parse(r io.Reader) (*Config, error) {
 	cfg := &Config{
 		App: AppConfig{
@@ -82,7 +79,6 @@ func Parse(r io.Reader) (*Config, error) {
 		},
 	}
 
-	hardStopSet := false
 	scanner := bufio.NewScanner(r)
 	section := ""
 	lineNum := 0
@@ -109,7 +105,7 @@ func Parse(r io.Reader) (*Config, error) {
 		key := strings.ToLower(strings.TrimSpace(parts[0]))
 		rawVal := strings.TrimSpace(parts[1])
 
-		if err := assignField(cfg, section, key, rawVal, &hardStopSet); err != nil {
+		if err := assignField(cfg, section, key, rawVal); err != nil {
 			return nil, fmt.Errorf("line %d (%s.%s): %w", lineNum, section, key, err)
 		}
 	}
@@ -118,14 +114,14 @@ func Parse(r io.Reader) (*Config, error) {
 		return nil, fmt.Errorf("scan config: %w", err)
 	}
 
-	if err := cfg.Validate(hardStopSet); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
 }
 
-func assignField(cfg *Config, section, key, rawVal string, hardStopSet *bool) error {
+func assignField(cfg *Config, section, key, rawVal string) error {
 	fullKey := key
 	if section != "" {
 		fullKey = section + "." + key
@@ -198,7 +194,6 @@ func assignField(cfg *Config, section, key, rawVal string, hardStopSet *bool) er
 			return fmt.Errorf("invalid bool %q: %w", rawVal, err)
 		}
 		cfg.Budget.HardStop = val
-		*hardStopSet = true
 	case "storage.sqlite_path", "sqlite_path":
 		val, err := parseString(rawVal)
 		if err != nil {
@@ -230,8 +225,7 @@ func parseString(raw string) (string, error) {
 	return "", fmt.Errorf("string value must be quoted: %q", raw)
 }
 
-// Validate enforces SmallCloud's tenant isolation, resource bounds, and mandatory spend-cap rules.
-func (c *Config) Validate(hardStopExplicit bool) error {
+func (c *Config) Validate() error {
 	if !validSlugRe.MatchString(c.App.Name) {
 		return errors.New("app.name is required and must be a lowercase alphanumeric slug (2-63 chars)")
 	}
@@ -262,7 +256,7 @@ func (c *Config) Validate(hardStopExplicit bool) error {
 	if c.Budget.AlertAtPct <= 0 || c.Budget.AlertAtPct >= 100 {
 		return errors.New("budget.alert_at_pct must be between 0 and 100 (exclusive)")
 	}
-	if hardStopExplicit && !c.Budget.HardStop {
+	if !c.Budget.HardStop {
 		return errors.New("budget.hard_stop cannot be disabled: SmallCloud requires 100% hard-stop enforcement at max_monthly_usd")
 	}
 	if strings.TrimSpace(c.Storage.SQLitePath) == "" || !strings.HasPrefix(c.Storage.SQLitePath, "/") {

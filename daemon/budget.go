@@ -6,7 +6,6 @@ import (
 	"sync"
 )
 
-// ErrBudgetExceeded is returned when an app reaches 100% of its max_monthly_usd cap.
 var ErrBudgetExceeded = errors.New("monthly spend cap reached: circuit breaker tripped")
 
 type BudgetStatus string
@@ -27,7 +26,6 @@ type AppBudgetState struct {
 	Halted        bool         `json:"halted"`
 }
 
-// BudgetTracker enforces 100% hard-stop monthly spend caps per (org_id, app_name).
 type BudgetTracker struct {
 	mu     sync.RWMutex
 	states map[string]*AppBudgetState
@@ -78,7 +76,6 @@ func (b *BudgetTracker) RegisterApp(orgID, appName string, maxMonthlyUSD, alertA
 	return nil
 }
 
-// RecordSpend adds accrued compute/egress spend and trips the hard-stop circuit breaker if >= max_monthly_usd.
 func (b *BudgetTracker) RecordSpend(orgID, appName string, deltaUSD float64) (AppBudgetState, error) {
 	if deltaUSD < 0 {
 		return AppBudgetState{}, errors.New("deltaUSD cannot be negative")
@@ -109,7 +106,6 @@ func (b *BudgetTracker) RecordSpend(orgID, appName string, deltaUSD float64) (Ap
 	return snapshot, nil
 }
 
-// CheckAllowed returns ErrBudgetExceeded if the app's circuit breaker is tripped.
 func (b *BudgetTracker) CheckAllowed(orgID, appName string) error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

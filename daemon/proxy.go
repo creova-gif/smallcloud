@@ -7,22 +7,27 @@ import (
 	"time"
 )
 
-// RouteEntry represents an active Blue/Green route managed by Caddy.
+type ReleaseColor string
+
+const (
+	ColorBlue  ReleaseColor = "blue"
+	ColorGreen ReleaseColor = "green"
+)
+
 type RouteEntry struct {
-	OrgID            string    `json:"org_id"`
-	AppName          string    `json:"app_name"`
-	Domain           string    `json:"domain"`
-	ActiveColor      string    `json:"active_color"` // "blue" or "green"
-	ActiveReleaseID  string    `json:"active_release_id"`
-	ActiveUpstream   string    `json:"active_upstream"`
-	StandbyColor     string    `json:"standby_color"`
-	StandbyReleaseID string    `json:"standby_release_id"`
-	StandbyUpstream  string    `json:"standby_upstream"`
-	Halted           bool      `json:"halted"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	OrgID            string       `json:"org_id"`
+	AppName          string       `json:"app_name"`
+	Domain           string       `json:"domain"`
+	ActiveColor      ReleaseColor `json:"active_color"`
+	ActiveReleaseID  string       `json:"active_release_id"`
+	ActiveUpstream   string       `json:"active_upstream"`
+	StandbyColor     ReleaseColor `json:"standby_color"`
+	StandbyReleaseID string       `json:"standby_release_id"`
+	StandbyUpstream  string       `json:"standby_upstream"`
+	Halted           bool         `json:"halted"`
+	UpdatedAt        time.Time    `json:"updated_at"`
 }
 
-// CaddyRouter manages atomic zero-downtime Blue/Green upstream swaps and rollbacks.
 type CaddyRouter struct {
 	mu     sync.RWMutex
 	routes map[string]*RouteEntry
@@ -34,7 +39,6 @@ func NewCaddyRouter() *CaddyRouter {
 	}
 }
 
-// SwapRoute promotes a newly healthy release into the active slot and moves the previous release to standby.
 func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream string) (RouteEntry, error) {
 	if orgID == "" || appName == "" || domain == "" || releaseID == "" || upstream == "" {
 		return RouteEntry{}, errors.New("orgID, appName, domain, releaseID, and upstream are required")
@@ -52,7 +56,7 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 			OrgID:           orgID,
 			AppName:         appName,
 			Domain:          domain,
-			ActiveColor:     "blue",
+			ActiveColor:     ColorBlue,
 			ActiveReleaseID: releaseID,
 			ActiveUpstream:  upstream,
 			UpdatedAt:       now,
@@ -61,9 +65,9 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 		return *entry, nil
 	}
 
-	nextColor := "green"
-	if curr.ActiveColor == "green" {
-		nextColor = "blue"
+	nextColor := ColorGreen
+	if curr.ActiveColor == ColorGreen {
+		nextColor = ColorBlue
 	}
 
 	curr.StandbyColor = curr.ActiveColor
@@ -80,7 +84,6 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 	return *curr, nil
 }
 
-// Rollback atomically swaps the standby release back into the active slot with zero dropped requests.
 func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -102,7 +105,6 @@ func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
 	return *curr, nil
 }
 
-// HaltRoute disables upstream routing when the monthly spend cap circuit breaker trips.
 func (r *CaddyRouter) HaltRoute(orgID, appName string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -124,7 +126,6 @@ func (r *CaddyRouter) GetRoute(orgID, appName string) (RouteEntry, bool) {
 	return *curr, true
 }
 
-// RenderCaddyfile produces a deterministic Caddyfile snippet for the given route.
 func RenderCaddyfile(entry RouteEntry, healthPath string) string {
 	if entry.Halted {
 		return fmt.Sprintf("%s {\n\trespond \"402 Payment Required: SmallCloud monthly spend cap reached\" 402\n}\n", entry.Domain)

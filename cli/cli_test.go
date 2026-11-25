@@ -42,7 +42,7 @@ func TestCLIDeployRollbackAndEval(t *testing.T) {
 	if err := json.Unmarshal(deployOut.Bytes(), &deployRes); err != nil {
 		t.Fatalf("unmarshal deploy result: %v", err)
 	}
-	if deployRes.ReleaseID != "v2.0.0" || deployRes.ActiveColor != "blue" {
+	if deployRes.ReleaseID != "v2.0.0" || deployRes.ActiveColor != daemon.ColorBlue {
 		t.Fatalf("unexpected deploy result: %+v", deployRes)
 	}
 

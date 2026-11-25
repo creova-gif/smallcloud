@@ -8,12 +8,11 @@ import (
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
 
-// DeploymentResult summarizes a completed deployment or rollback operation.
 type DeploymentResult struct {
 	OrgID        string         `json:"org_id"`
 	AppName      string         `json:"app_name"`
 	ReleaseID    string         `json:"release_id"`
-	ActiveColor  string         `json:"active_color"`
+	ActiveColor  ReleaseColor   `json:"active_color"`
 	Upstream     string         `json:"upstream"`
 	DeployTimeMs int64          `json:"deploy_time_ms"`
 	ColdStartMs  int64          `json:"cold_start_ms"`
@@ -22,7 +21,6 @@ type DeploymentResult struct {
 	Budget       AppBudgetState `json:"budget"`
 }
 
-// Daemon coordinates cgroups v2 isolation, Litestream SQLite persistence, Caddy routing, and spend caps.
 type Daemon struct {
 	mu      sync.Mutex
 	budget  *BudgetTracker
@@ -50,10 +48,9 @@ func (d *Daemon) Cgroups() *CgroupManager  { return d.cgroups }
 func (d *Daemon) Storage() *StorageManager { return d.storage }
 func (d *Daemon) Router() *CaddyRouter     { return d.router }
 
-// Deploy validates the config, enforces budget eligibility, configures cgroups v2, and swaps the Blue/Green route.
 func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult, error) {
 	start := time.Now()
-	if err := cfg.Validate(true); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
@@ -102,7 +99,6 @@ func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult
 	}, nil
 }
 
-// Rollback atomically reverts traffic to the standby release and returns the updated route.
 func (d *Daemon) Rollback(orgID, appName string) (RouteEntry, error) {
 	if err := d.budget.CheckAllowed(orgID, appName); err != nil {
 		return RouteEntry{}, err

@@ -46,7 +46,7 @@ func TestDaemonDeployRollbackAndZeroDowntimeSwap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy v1 failed: %v", err)
 	}
-	if res1.ActiveColor != "blue" || res1.ReleaseID != "v1.0.0" {
+	if res1.ActiveColor != ColorBlue || res1.ReleaseID != "v1.0.0" {
 		t.Fatalf("expected blue v1.0.0, got %+v", res1)
 	}
 	if res1.DeployTimeMs >= 30000 {
@@ -56,7 +56,6 @@ func TestDaemonDeployRollbackAndZeroDowntimeSwap(t *testing.T) {
 		t.Fatalf("cold start exceeded 300ms SLA: %dms", res1.ColdStartMs)
 	}
 
-	// Verify cgroups v2 files were written
 	cpuMax, err := os.ReadFile(filepath.Join(res1.Cgroup.CgroupPath, "cpu.max"))
 	if err != nil {
 		t.Fatalf("read cpu.max: %v", err)
@@ -65,21 +64,19 @@ func TestDaemonDeployRollbackAndZeroDowntimeSwap(t *testing.T) {
 		t.Fatalf("expected cpu.max '50000 100000', got %q", string(cpuMax))
 	}
 
-	// Deploy v1.1.0 (Green)
 	res2, err := d.Deploy(cfg, "v1.1.0")
 	if err != nil {
 		t.Fatalf("deploy v1.1.0 failed: %v", err)
 	}
-	if res2.ActiveColor != "green" || res2.Route.StandbyReleaseID != "v1.0.0" {
+	if res2.ActiveColor != ColorGreen || res2.Route.StandbyReleaseID != "v1.0.0" {
 		t.Fatalf("expected green active and v1.0.0 standby, got %+v", res2.Route)
 	}
 
-	// Rollback to v1.0.0
 	rolled, err := d.Rollback(cfg.App.OrgID, cfg.App.Name)
 	if err != nil {
 		t.Fatalf("rollback failed: %v", err)
 	}
-	if rolled.ActiveReleaseID != "v1.0.0" || rolled.ActiveColor != "blue" {
+	if rolled.ActiveReleaseID != "v1.0.0" || rolled.ActiveColor != ColorBlue {
 		t.Fatalf("expected rollback to v1.0.0 (blue), got %+v", rolled)
 	}
 }
@@ -92,7 +89,6 @@ func TestBudgetCircuitBreakerHardStop(t *testing.T) {
 		t.Fatalf("deploy failed: %v", err)
 	}
 
-	// 80% warning threshold ($4.00 of $5.00)
 	st, err := d.Budget().RecordSpend(cfg.App.OrgID, cfg.App.Name, 4.00)
 	if err != nil {
 		t.Fatalf("unexpected error at 80%% spend: %v", err)
@@ -101,7 +97,6 @@ func TestBudgetCircuitBreakerHardStop(t *testing.T) {
 		t.Fatalf("expected warning status without halt, got %+v", st)
 	}
 
-	// Reach 100% ($5.00 of $5.00) -> must trip hard stop
 	st, err = d.Budget().RecordSpend(cfg.App.OrgID, cfg.App.Name, 1.00)
 	if !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
@@ -110,7 +105,6 @@ func TestBudgetCircuitBreakerHardStop(t *testing.T) {
 		t.Fatalf("expected halted hard_stop state, got %+v", st)
 	}
 
-	// Verify Caddy route was automatically halted
 	route, ok := d.Router().GetRoute(cfg.App.OrgID, cfg.App.Name)
 	if !ok || !route.Halted {
 		t.Fatalf("expected route to be halted when budget tripped, got %+v", route)
@@ -120,7 +114,6 @@ func TestBudgetCircuitBreakerHardStop(t *testing.T) {
 		t.Fatalf("expected halted Caddyfile to respond with 402, got:\n%s", caddyCfg)
 	}
 
-	// Subsequent deploys while over budget must be blocked
 	if _, err := d.Deploy(cfg, "v1.2.0"); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected deploy to be blocked by ErrBudgetExceeded, got %v", err)
 	}
@@ -144,7 +137,6 @@ func TestLitestreamZeroDataLossOnRestart(t *testing.T) {
 		t.Fatalf("unexpected snapshot metadata: %+v", snap)
 	}
 
-	// Simulate container wipe/restart
 	if err := os.Remove(dbPath); err != nil {
 		t.Fatalf("remove db: %v", err)
 	}

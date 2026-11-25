@@ -1,5 +1,3 @@
-"""Sample FastAPI + SQLite micro-SaaS application for SmallCloud."""
-
 from __future__ import annotations
 
 import os

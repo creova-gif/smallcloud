@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-// SnapshotMetadata records a Litestream WAL checkpoint & object-store replica sync.
 type SnapshotMetadata struct {
 	OrgID      string    `json:"org_id"`
 	AppName    string    `json:"app_name"`
@@ -20,7 +19,6 @@ type SnapshotMetadata struct {
 	SyncedAt   time.Time `json:"synced_at"`
 }
 
-// StorageManager manages Litestream SQLite replication and restore across container restarts.
 type StorageManager struct {
 	mu          sync.Mutex
 	replicaDir  string
@@ -38,7 +36,6 @@ func (s *StorageManager) replicaPath(orgID, appName string) string {
 	return filepath.Join(s.replicaDir, orgID, appName, "replica.db")
 }
 
-// SyncWAL flushes and replicates the SQLite database file to the Litestream replica store.
 func (s *StorageManager) SyncWAL(orgID, appName, sqliteHostPath string) (*SnapshotMetadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,7 +72,6 @@ func (s *StorageManager) SyncWAL(orgID, appName, sqliteHostPath string) (*Snapsh
 	}, nil
 }
 
-// Restore recovers the latest SQLite database snapshot from the replica store to sqliteHostPath.
 func (s *StorageManager) Restore(orgID, appName, sqliteHostPath string) (*SnapshotMetadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -1,4 +1,3 @@
-# SmallCloud Zero-Ops Configuration
 [app]
 name = "fastapi-starter"
 org_id = "org-indie-default"

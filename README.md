@@ -1,42 +1,40 @@
-# SmallCloud: Zero-Ops Cloud for Small Software & Micro-SaaS
+# SmallCloud
 
-Deploy micro-SaaS applications from `git push` to HTTPS in `<30s` with built-in Litestream SQLite persistence, Linux cgroups v2 isolation, Caddy zero-downtime Blue/Green routing, and a 100% hard-stop monthly spend circuit breaker (`max_monthly_usd`).
+SmallCloud deploys single-node web applications from a repository to HTTPS in under 30 seconds. It enforces Linux cgroups v2 limits, replicates SQLite with Litestream, swaps routes through Caddy, and stops traffic when an application reaches `max_monthly_usd`.
 
-- **Spec & GTM Doc:** [SmallCloud: Zero-Ops Cloud for Small Software & Micro-SaaS](https://docs.google.com/document/d/1iubHHzeGYTd_kYHKyCuLIc_kNsvzs_cD1i2SvL9xT7I/edit?usp=drivesdk&ouid=110227624285917376281)
-- **Portfolio Strategy:** [Startup & Open-Source Cross-Project Strategy](https://docs.google.com/document/d/12Wpg5mMGnjnl2uhMBTOR0QqRzQj8kwfzTLpvLoRuB5Q/edit?usp=drivesdk&ouid=110227624285917376281)
-- **Architecture & Security:** See `AGENTS.md`, `docs/adr/001-small-software-architecture.md`, and `docs/THREAT_MODEL.md`.
+- [SmallCloud Spec and GTM Doc](https://docs.google.com/document/d/1iubHHzeGYTd_kYHKyCuLIc_kNsvzs_cD1i2SvL9xT7I/edit?usp=drivesdk&ouid=110227624285917376281)
+- [Startup and Open-Source Portfolio Strategy](https://docs.google.com/document/d/12Wpg5mMGnjnl2uhMBTOR0QqRzQj8kwfzTLpvLoRuB5Q/edit?usp=drivesdk&ouid=110227624285917376281)
+- [ADR-001 Architecture Decision Record](docs/adr/001-small-software-architecture.md)
+- [Threat Model](docs/THREAT_MODEL.md)
 
-## Repository Layout
+## Repository layout
 
-- `pkg/config/` — Strict `smallcloud.toml` parser & validator enforcing `org_id` tenant isolation and `max_monthly_usd` hard spend caps.
-- `daemon/` — Control plane daemon managing Linux cgroups v2 (`cpu.max`, `memory.max`), Litestream SQLite WAL snapshot/restore, Caddy Blue/Green zero-downtime route swapping, and the spend-cap circuit breaker.
-- `cli/` — `smallcloud` CLI (`package`, `deploy`, `rollback`, `eval`) and binary entrypoint (`cli/cmd/smallcloud`).
-- `templates/fastapi-sqlite/` — Reference Python 3.12 FastAPI + SQLite WAL micro-SaaS starter template with `Dockerfile`, `Caddyfile`, `litestream.yml`, and `smallcloud.toml`.
+- `pkg/config/` parses `smallcloud.toml` and validates `org_id` tenant scoping and `max_monthly_usd` limits.
+- `daemon/` writes cgroups v2 files (`cpu.max`, `memory.max`), syncs and restores SQLite files, swaps Blue and Green Caddy routes, and trips the spend circuit breaker.
+- `cli/` implements the `smallcloud` commands (`package`, `deploy`, `rollback`, `eval`) with main entrypoint `cli/cmd/smallcloud/main.go`.
+- `templates/fastapi-sqlite/` contains a Python 3.12 FastAPI and SQLite starter application with `Dockerfile`, `Caddyfile`, `litestream.yml`, and `smallcloud.toml`.
 
-## Quickstart
+## Run the CLI
 
 ```bash
-# 1. Package the reference FastAPI + SQLite micro-SaaS app
-go run ./cli/cmd/smallcloud package ./templates/fastapi-sqlite
-
-# 2. Deploy a release with Blue/Green zero-downtime routing
-go run ./cli/cmd/smallcloud deploy ./templates/fastapi-sqlite v1.0.0
-
-# 3. Roll back atomically to the previous standby release
-go run ./cli/cmd/smallcloud rollback ./templates/fastapi-sqlite
-
-# 4. Run the deterministic SLA evaluation gate
-go run ./cli/cmd/smallcloud eval
+	go run ./cli/cmd/smallcloud package ./templates/fastapi-sqlite
+	go run ./cli/cmd/smallcloud deploy ./templates/fastapi-sqlite v1.0.0
+	go run ./cli/cmd/smallcloud rollback ./templates/fastapi-sqlite
+	go run ./cli/cmd/smallcloud eval
 ```
 
-## Reproducible Evaluation Benchmarks
+## Benchmark results
 
-Run `go test -race ./... && go run ./cli/cmd/smallcloud eval` to verify all `PROJECT_SPEC.md` thresholds:
+Generate the release binary and run 7 iterations of `smallcloud eval`:
 
-| Metric | Target Threshold | Measured Result | Status |
+```bash
+	go build -o /tmp/smallcloud-bin ./cli/cmd/smallcloud
+	for i in 1 2 3 4 5 6 7; do /tmp/smallcloud-bin eval; done
+```
+
+| Metric | Target | Measured (7 runs, release binary) | Limiter |
 | :--- | :--- | :--- | :--- |
-| Deploy Latency | `< 30,000 ms` (`<30s`) | `< 5 ms` (control-plane swap) | PASS |
-| Cold-Start / Route Swap | `< 300 ms` | `< 2 ms` | PASS |
-| Spend-Cap Hard Stop (`max_monthly_usd`) | `100%` enforcement | `100.0%` (`100/100` blocked at cap) | PASS |
-| SQLite Container Restart Data Loss | `0 bytes` | `0 bytes` (SHA-256 verified) | PASS |
-| Blue/Green Rollback | Zero-downtime atomic swap | Verified (`v1.1.0` -> `v1.0.0`) | PASS |
+| Deploy control-plane swap | `< 30,000 ms` | `0 ms` median (`0` to `2 ms` range) | Local filesystem `cpu.max` and `memory.max` writes |
+| Route swap and rollback | `< 300 ms` | `0 ms` median (`0` to `8 ms` range) | Mutex acquisition and map update in `CaddyRouter` |
+| Spend cap stop (`max_monthly_usd`) | `100%` | `100%` (`100/100` calls rejected with `ErrBudgetExceeded`) | Synchronous check in `BudgetTracker.CheckAllowed` |
+| SQLite restart data loss | `0 bytes` | `0 bytes` (`55/55` bytes and SHA-256 verified) | Temp-file write and atomic `os.Rename` |

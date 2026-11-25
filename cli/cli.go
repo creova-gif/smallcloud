@@ -14,7 +14,6 @@ import (
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
 
-// BundleManifest describes a packaged SmallCloud application artifact ready for deployment.
 type BundleManifest struct {
 	Config        *config.Config `json:"config"`
 	Dockerfile    string         `json:"dockerfile"`
@@ -22,7 +21,6 @@ type BundleManifest struct {
 	LitestreamYML string         `json:"litestream_yml"`
 }
 
-// EvalReport captures deterministic benchmark metrics against PROJECT_SPEC.md acceptance thresholds.
 type EvalReport struct {
 	DeployLatencyMs      int64   `json:"deploy_latency_ms"`
 	DeployThresholdMs    int64   `json:"deploy_threshold_ms"`
@@ -34,7 +32,6 @@ type EvalReport struct {
 	Passed               bool    `json:"passed"`
 }
 
-// PackageApp validates smallcloud.toml in appDir and produces a BundleManifest with generated Caddyfile & Litestream config.
 func PackageApp(appDir string) (*BundleManifest, error) {
 	tomlPath := filepath.Join(appDir, "smallcloud.toml")
 	cfg, err := config.LoadFile(tomlPath)
@@ -52,7 +49,7 @@ func PackageApp(appDir string) (*BundleManifest, error) {
 		OrgID:           cfg.App.OrgID,
 		AppName:         cfg.App.Name,
 		Domain:          cfg.App.Domain,
-		ActiveColor:     "blue",
+		ActiveColor:     daemon.ColorBlue,
 		ActiveReleaseID: "v1",
 		ActiveUpstream:  fmt.Sprintf("127.0.0.1:%d", cfg.App.Port),
 	}
@@ -73,7 +70,6 @@ func PackageApp(appDir string) (*BundleManifest, error) {
 	}, nil
 }
 
-// RunEvalSuite executes the deterministic SmallCloud acceptance suite and verifies all SLA gates.
 func RunEvalSuite(workDir string) (*EvalReport, error) {
 	cgRoot := filepath.Join(workDir, "cgroups")
 	repRoot := filepath.Join(workDir, "replicas")
@@ -121,9 +117,8 @@ func RunEvalSuite(workDir string) (*EvalReport, error) {
 		return nil, fmt.Errorf("eval rollback: %w", err)
 	}
 	coldStartMs := time.Since(tSwap).Milliseconds()
-	zeroDowntime := res1.ActiveColor == "blue" && res2.ActiveColor == "green" && rolled.ActiveReleaseID == "v1.0.0"
+	zeroDowntime := res1.ActiveColor == daemon.ColorBlue && res2.ActiveColor == daemon.ColorGreen && rolled.ActiveReleaseID == "v1.0.0"
 
-	// Persistence check: 0 data loss across simulated container restart
 	dbFile := filepath.Join(workDir, "eval.db")
 	payload := []byte("SQLite format 3\x00---smallcloud-eval-wal-frame-verified---")
 	if err := os.WriteFile(dbFile, payload, 0o600); err != nil {
@@ -147,7 +142,6 @@ func RunEvalSuite(workDir string) (*EvalReport, error) {
 		dataLossBytes = int64(len(payload))
 	}
 
-	// Hard spend cap check: 100 trials at >= max_monthly_usd
 	blockedCount := 0
 	_, spendErr := d.Budget().RecordSpend(cfg.App.OrgID, cfg.App.Name, 5.00)
 	if errors.Is(spendErr, daemon.ErrBudgetExceeded) {
@@ -177,7 +171,6 @@ func RunEvalSuite(workDir string) (*EvalReport, error) {
 	}, nil
 }
 
-// Run executes the CLI command with given arguments and writes output to stdout.
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: smallcloud <package|deploy|rollback|eval> [args]")
