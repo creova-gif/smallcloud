@@ -44,6 +44,7 @@ type AppBudgetState struct {
 	BillingMonth  string           `json:"billing_month"`
 	Status        BudgetStatus     `json:"status"`
 	Halted        bool             `json:"halted"`
+	AlertSent     bool             `json:"alert_sent,omitempty"`
 	Events        []BudgetEvent    `json:"events,omitempty"`
 	History       []MonthlyArchive `json:"history,omitempty"`
 }
@@ -53,6 +54,7 @@ type BudgetTracker struct {
 	states   map[string]*AppBudgetState
 	onHalt   func(orgID, appName string)
 	onUnhalt func(orgID, appName string)
+	onAlert  func(orgID, appName string, state AppBudgetState)
 }
 
 func NewBudgetTracker(onHalt func(orgID, appName string)) *BudgetTracker {
@@ -65,6 +67,12 @@ func NewBudgetTrackerWithCallbacks(onHalt, onUnhalt func(orgID, appName string))
 		onHalt:   onHalt,
 		onUnhalt: onUnhalt,
 	}
+}
+
+func (b *BudgetTracker) SetAlertCallback(fn func(orgID, appName string, state AppBudgetState)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onAlert = fn
 }
 
 func tenantKey(orgID, appName string) string {
@@ -113,6 +121,7 @@ func (b *BudgetTracker) RegisterApp(orgID, appName string, maxMonthlyUSD, alertA
 	}
 
 	wasHalted := existing.Halted
+	wasAlertSent := existing.AlertSent
 	if existing.BillingMonth == "" {
 		existing.BillingMonth = time.Now().UTC().Format("2006-01")
 	}
@@ -120,10 +129,18 @@ func (b *BudgetTracker) RegisterApp(orgID, appName string, maxMonthlyUSD, alertA
 	existing.AlertAtPct = alertAtPct
 	b.recomputeLocked(existing, wasHalted)
 	shouldUnhalt := wasHalted && !existing.Halted && b.onUnhalt != nil
+	shouldAlert := !wasAlertSent && existing.AlertSent && b.onAlert != nil
+	var alertSnapshot AppBudgetState
+	if shouldAlert {
+		alertSnapshot = cloneBudgetState(existing)
+	}
 	b.mu.Unlock()
 
 	if shouldUnhalt {
 		b.onUnhalt(orgID, appName)
+	}
+	if shouldAlert {
+		b.onAlert(orgID, appName, alertSnapshot)
 	}
 	return nil
 }
@@ -143,17 +160,22 @@ func (b *BudgetTracker) SetMaxBudget(orgID, appName string, maxMonthlyUSD float6
 		return AppBudgetState{}, fmt.Errorf("app %q not registered for org %q", appName, orgID)
 	}
 	wasHalted := st.Halted
+	wasAlertSent := st.AlertSent
 	st.MaxMonthlyUSD = maxMonthlyUSD
 	b.recomputeLocked(st, wasHalted)
 	snapshot := cloneBudgetState(st)
 	shouldHalt := !wasHalted && st.Halted && b.onHalt != nil
 	shouldUnhalt := wasHalted && !st.Halted && b.onUnhalt != nil
+	shouldAlert := !wasAlertSent && st.AlertSent && b.onAlert != nil
 	b.mu.Unlock()
 
 	if shouldHalt {
 		b.onHalt(orgID, appName)
 	} else if shouldUnhalt {
 		b.onUnhalt(orgID, appName)
+	}
+	if shouldAlert {
+		b.onAlert(orgID, appName, snapshot)
 	}
 	return snapshot, nil
 }
@@ -175,14 +197,19 @@ func (b *BudgetTracker) RecordSpend(orgID, appName string, deltaUSD float64) (Ap
 	}
 
 	wasHalted := st.Halted
+	wasAlertSent := st.AlertSent
 	st.CurrentUSD += deltaUSD
 	b.recomputeLocked(st, wasHalted)
 	snapshot := cloneBudgetState(st)
 	shouldCallHalt := !wasHalted && st.Halted && b.onHalt != nil
+	shouldAlert := !wasAlertSent && st.AlertSent && b.onAlert != nil
 	b.mu.Unlock()
 
 	if shouldCallHalt {
 		b.onHalt(orgID, appName)
+	}
+	if shouldAlert {
+		b.onAlert(orgID, appName, snapshot)
 	}
 
 	if snapshot.Halted {
@@ -260,6 +287,7 @@ func (b *BudgetTracker) rolloverLocked(st *AppBudgetState, targetMonth string, a
 		ArchivedAt:    archivedAt,
 	})
 	st.CurrentUSD = 0
+	st.AlertSent = false
 	st.BillingMonth = targetMonth
 	b.recomputeLocked(st, wasHalted)
 	return wasHalted && !st.Halted && b.onUnhalt != nil
@@ -333,6 +361,9 @@ func cloneBudgetState(st *AppBudgetState) AppBudgetState {
 func (b *BudgetTracker) recomputeLocked(st *AppBudgetState, wasHalted bool) {
 	prevStatus := st.Status
 	pct := (st.CurrentUSD / st.MaxMonthlyUSD) * 100.0
+	if pct >= st.AlertAtPct && !st.AlertSent {
+		st.AlertSent = true
+	}
 	if st.CurrentUSD >= st.MaxMonthlyUSD || pct >= 100.0 {
 		st.Status = BudgetHardStop
 		st.Halted = true

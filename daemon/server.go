@@ -45,6 +45,8 @@ func (d *Daemon) Handler() http.Handler {
 
 func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", d.handleUI)
+	mux.HandleFunc("GET /ui", d.handleUI)
 	mux.HandleFunc("GET /healthz", d.handleHealthz)
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)

@@ -16,15 +16,22 @@
 - [x] Run first external design-partner or open-source release
 
 ## Wave 4: Production Control Plane & Multi-Runtime Maturity
-- [ ] Audit Log & Event Stream (`daemon` structured append-only audit log and `GET /v1/events`)
-- [ ] App Teardown / `destroy` (`smallcloud destroy <app>` with Caddy route removal, container stop, and optional data purge)
-- [ ] `[env]` Config & Runtime Injection (`smallcloud.toml` `[env]` table passed securely into container runtime)
+- [x] Audit Log & Event Stream (`daemon` structured append-only audit log and `GET /v1/events`)
+- [x] App Teardown / `destroy` (`smallcloud destroy <app>` with Caddy route removal, container stop, and optional data purge)
+- [x] `[env]` Config & Runtime Injection (`smallcloud.toml` `[env]` table passed securely into container runtime)
 - [x] Go SQLite Template (`templates/go-sqlite/` zero-dependency starter with `smallcloud.toml` and multi-stage `Dockerfile`)
-- [ ] HTTP Readiness Gate & Prometheus `/metrics` (`daemon` readiness probe and Prometheus metrics endpoint)
+- [x] HTTP Readiness Gate & Prometheus `/metrics` (`daemon` readiness probe and Prometheus metrics endpoint)
 
 ## Wave 5: Full Product Engineering & Scope Expansion
-- [ ] Embedded Operator Web UI (lightweight single-binary dashboard for deployments, budgets, and logs)
-- [ ] Signed Budget/Alert Webhooks (HMAC-SHA256 signed webhook delivery on budget thresholds and hard-stop events)
+- [x] Embedded Operator Web UI (lightweight single-binary dashboard for deployments, budgets, and logs)
+- [x] Signed Budget/Alert Webhooks (HMAC-SHA256 signed webhook delivery on budget thresholds and hard-stop events)
 - [ ] Live `doctor --live` TLS & Caddy Admin Probe (active Caddy admin API and TLS certificate verification)
-- [ ] Automated Snapshot Pruning & S3/GCS Backup Lifecycle (retention policies and scheduled object-store pruning)
+- [x] Automated Snapshot Pruning & S3/GCS Backup Lifecycle (retention policies and scheduled object-store pruning)
 - [ ] Multi-Node Worker Pool / Edge Routing (multi-host scheduling and edge proxy route synchronization)
+
+## Wave 6: Enterprise Control Plane, Multi-Tenant Quotas & Release Lifecycle
+- [ ] Org-Level Aggregate Spend Quotas & Soft/Hard Rollup
+- [ ] Release Artifact Signing & Checksum Attestation
+- [ ] Streaming Container Logs (`smallcloud logs`)
+- [ ] Canary Traffic Weighting (`X%` Blue / `Y%` Green)
+- [ ] Multi-Node Worker Pool & Edge Route Sync

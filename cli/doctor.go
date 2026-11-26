@@ -2,10 +2,12 @@ package cli
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
@@ -104,6 +106,59 @@ func RunDoctor(appDir, stateDir string) (*DoctorReport, error) {
 		Passed: passed,
 		Checks: checks,
 	}, nil
+}
+
+func RunDoctorLive(dir, stateDir, caddyAdminURL, daemonURL string) (*DoctorReport, error) {
+	report, err := RunDoctor(dir, stateDir)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	if caddyAdminURL != "" {
+		targetURL := strings.TrimRight(caddyAdminURL, "/") + "/config/"
+		report.Checks = append(report.Checks, probeHTTPCheck(client, "caddy_admin", targetURL))
+	}
+	if daemonURL != "" {
+		targetURL := strings.TrimRight(daemonURL, "/") + "/healthz"
+		report.Checks = append(report.Checks, probeHTTPCheck(client, "daemon_healthz", targetURL))
+	}
+
+	report.Passed = true
+	for _, c := range report.Checks {
+		if c.Status == DoctorStatusFail {
+			report.Passed = false
+			break
+		}
+	}
+
+	return report, nil
+}
+
+func probeHTTPCheck(client *http.Client, name, targetURL string) DoctorCheck {
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		return DoctorCheck{
+			Name:   name,
+			Status: DoctorStatusFail,
+			Detail: err.Error(),
+		}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return DoctorCheck{
+			Name:   name,
+			Status: DoctorStatusPass,
+			Detail: fmt.Sprintf("HTTP %d from %s", resp.StatusCode, targetURL),
+		}
+	}
+
+	return DoctorCheck{
+		Name:   name,
+		Status: DoctorStatusFail,
+		Detail: fmt.Sprintf("HTTP %d from %s", resp.StatusCode, targetURL),
+	}
 }
 
 func checkOptionalFile(appDir, name string) DoctorCheck {

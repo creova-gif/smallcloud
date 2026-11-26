@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,123 @@ func TestStorageManagerRestoreRejectsCorruptChecksumBeforeRename(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "host.db" {
 		t.Fatalf("unexpected leftover files in restoreDir: %v", entries)
+	}
+}
+
+func TestStorageManagerListSnapshotsAndPruneSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(filepath.Join(dir, "replicas"))
+
+	empty, err := sm.ListSnapshots("acme", "app1")
+	if err != nil {
+		t.Fatalf("ListSnapshots empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("ListSnapshots empty len = %d, want 0", len(empty))
+	}
+
+	if _, err := sm.ListSnapshots("../etc", "app1"); err == nil {
+		t.Fatal("expected error for invalid orgID in ListSnapshots")
+	}
+	if _, err := sm.PruneSnapshots("../etc", "app1", 1); err == nil {
+		t.Fatal("expected error for invalid orgID in PruneSnapshots")
+	}
+	for _, invalidKeep := range []int{0, -1, -10} {
+		if _, err := sm.PruneSnapshots("acme", "app1", invalidKeep); err == nil {
+			t.Fatalf("expected error for keepLast=%d", invalidKeep)
+		}
+	}
+
+	srcPath := filepath.Join(dir, "host.db")
+	var expected []*SnapshotMetadata
+	var latestPayload []byte
+	for i := 1; i <= 4; i++ {
+		payload := []byte(fmt.Sprintf("sqlite-snapshot-payload-gen-%d", i))
+		latestPayload = payload
+		if err := os.WriteFile(srcPath, payload, 0o600); err != nil {
+			t.Fatalf("write source gen %d: %v", i, err)
+		}
+		meta, err := sm.SyncWAL("acme", "app1", srcPath)
+		if err != nil {
+			t.Fatalf("SyncWAL gen %d: %v", i, err)
+		}
+		expected = append(expected, meta)
+	}
+
+	listed, err := sm.ListSnapshots("acme", "app1")
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(listed) != 4 {
+		t.Fatalf("ListSnapshots len = %d, want 4", len(listed))
+	}
+	for i, snap := range listed {
+		want := expected[len(expected)-1-i]
+		if snap.Generation != want.Generation || snap.SHA256 != want.SHA256 || snap.SizeBytes != want.SizeBytes {
+			t.Fatalf("listed[%d] = %+v, want %+v", i, snap, want)
+		}
+	}
+
+	pruned, err := sm.PruneSnapshots("acme", "app1", 2)
+	if err != nil {
+		t.Fatalf("PruneSnapshots: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("PruneSnapshots pruned = %d, want 2", pruned)
+	}
+
+	afterPrune, err := sm.ListSnapshots("acme", "app1")
+	if err != nil {
+		t.Fatalf("ListSnapshots after prune: %v", err)
+	}
+	if len(afterPrune) != 2 {
+		t.Fatalf("ListSnapshots after prune len = %d, want 2", len(afterPrune))
+	}
+	if afterPrune[0].Generation != 4 || afterPrune[1].Generation != 3 {
+		t.Fatalf("unexpected remaining generations: %+v", afterPrune)
+	}
+
+	for _, gen := range []int{1, 2} {
+		snapPath := sm.snapshotPath("acme", "app1", gen)
+		if _, err := os.Stat(snapPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected pruned snapshot %q to be removed, err=%v", snapPath, err)
+		}
+		if _, err := os.Stat(snapPath + ".sha256"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected pruned sidecar %q to be removed, err=%v", snapPath+".sha256", err)
+		}
+	}
+
+	for _, gen := range []int{3, 4} {
+		snapPath := sm.snapshotPath("acme", "app1", gen)
+		if _, err := os.Stat(snapPath); err != nil {
+			t.Fatalf("expected kept snapshot %q to exist: %v", snapPath, err)
+		}
+		if _, err := os.Stat(snapPath + ".sha256"); err != nil {
+			t.Fatalf("expected kept sidecar %q to exist: %v", snapPath+".sha256", err)
+		}
+	}
+
+	restorePath := filepath.Join(dir, "restored", "host.db")
+	restoredMeta, err := sm.Restore("acme", "app1", restorePath)
+	if err != nil {
+		t.Fatalf("Restore after prune: %v", err)
+	}
+	if restoredMeta.SHA256 != expected[3].SHA256 {
+		t.Fatalf("Restore SHA256 = %s, want %s", restoredMeta.SHA256, expected[3].SHA256)
+	}
+	restoredBytes, err := os.ReadFile(restorePath)
+	if err != nil {
+		t.Fatalf("read restored db: %v", err)
+	}
+	if !bytes.Equal(restoredBytes, latestPayload) {
+		t.Fatalf("restored payload mismatch after prune")
+	}
+
+	prunedAgain, err := sm.PruneSnapshots("acme", "app1", 2)
+	if err != nil {
+		t.Fatalf("PruneSnapshots idempotent: %v", err)
+	}
+	if prunedAgain != 0 {
+		t.Fatalf("PruneSnapshots idempotent pruned = %d, want 0", prunedAgain)
 	}
 }

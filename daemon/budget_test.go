@@ -180,3 +180,83 @@ func TestBudgetRolloverAll(t *testing.T) {
 		t.Fatalf("expected only app-1 unhalted, got %v", unhalted)
 	}
 }
+
+func TestBudgetAlertCallbackFiresOnceAndResetsOnRollover(t *testing.T) {
+	var mu sync.Mutex
+	var alerts []AppBudgetState
+
+	bt := NewBudgetTracker(nil)
+	bt.SetAlertCallback(func(orgID, appName string, state AppBudgetState) {
+		mu.Lock()
+		alerts = append(alerts, state)
+		mu.Unlock()
+	})
+
+	if err := bt.RegisterApp("org-alpha", "app-one", 10.0, 80.0); err != nil {
+		t.Fatalf("RegisterApp failed: %v", err)
+	}
+
+	st, err := bt.RecordSpend("org-alpha", "app-one", 5.0)
+	if err != nil {
+		t.Fatalf("RecordSpend below threshold failed: %v", err)
+	}
+	if st.AlertSent {
+		t.Fatalf("expected AlertSent=false below threshold")
+	}
+
+	st, err = bt.RecordSpend("org-alpha", "app-one", 3.0)
+	if err != nil {
+		t.Fatalf("RecordSpend at threshold failed: %v", err)
+	}
+	if !st.AlertSent {
+		t.Fatalf("expected AlertSent=true at threshold")
+	}
+
+	st, err = bt.RecordSpend("org-alpha", "app-one", 1.0)
+	if err != nil {
+		t.Fatalf("RecordSpend above threshold failed: %v", err)
+	}
+	if !st.AlertSent {
+		t.Fatalf("expected AlertSent=true above threshold")
+	}
+
+	mu.Lock()
+	if len(alerts) != 1 {
+		mu.Unlock()
+		t.Fatalf("expected 1 alert before rollover, got %d", len(alerts))
+	}
+	if alerts[0].CurrentUSD != 8.0 || !alerts[0].AlertSent {
+		mu.Unlock()
+		t.Fatalf("unexpected first alert state: %+v", alerts[0])
+	}
+	mu.Unlock()
+
+	nextMonth := time.Date(2099, 12, 1, 0, 0, 0, 0, time.UTC)
+	st, rolled, err := bt.RolloverIfNewMonth("org-alpha", "app-one", nextMonth)
+	if err != nil {
+		t.Fatalf("RolloverIfNewMonth failed: %v", err)
+	}
+	if !rolled {
+		t.Fatalf("expected rolled=true")
+	}
+	if st.AlertSent {
+		t.Fatalf("expected AlertSent=false after rollover")
+	}
+
+	st, err = bt.RecordSpend("org-alpha", "app-one", 9.0)
+	if err != nil {
+		t.Fatalf("RecordSpend after rollover failed: %v", err)
+	}
+	if !st.AlertSent {
+		t.Fatalf("expected AlertSent=true after crossing threshold in new month")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) != 2 {
+		t.Fatalf("expected 2 alerts total after rollover, got %d", len(alerts))
+	}
+	if alerts[1].CurrentUSD != 9.0 || !alerts[1].AlertSent {
+		t.Fatalf("unexpected second alert state: %+v", alerts[1])
+	}
+}

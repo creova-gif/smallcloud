@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,5 +107,76 @@ func TestRunDoctorMissingConfigAndDockerfile(t *testing.T) {
 	}
 	if c := findCheck(t, report.Checks, "Dockerfile"); c.Status != DoctorStatusFail {
 		t.Fatalf("expected Dockerfile fail, got %+v", c)
+	}
+}
+
+func TestRunDoctorLivePass(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/config/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer caddySrv.Close()
+
+	daemonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer daemonSrv.Close()
+
+	report, err := RunDoctorLive(templateDir, stateDir, caddySrv.URL, daemonSrv.URL)
+	if err != nil {
+		t.Fatalf("RunDoctorLive failed: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("expected Passed == true, got false: %+v", report.Checks)
+	}
+
+	if c := findCheck(t, report.Checks, "caddy_admin"); c.Status != DoctorStatusPass {
+		t.Fatalf("expected caddy_admin pass, got %+v", c)
+	}
+	if c := findCheck(t, report.Checks, "daemon_healthz"); c.Status != DoctorStatusPass {
+		t.Fatalf("expected daemon_healthz pass, got %+v", c)
+	}
+}
+
+func TestRunDoctorLiveFailures(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer caddySrv.Close()
+
+	daemonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	daemonURL := daemonSrv.URL
+	daemonSrv.Close()
+
+	report, err := RunDoctorLive(templateDir, stateDir, caddySrv.URL, daemonURL)
+	if err != nil {
+		t.Fatalf("RunDoctorLive failed: %v", err)
+	}
+	if report.Passed {
+		t.Fatalf("expected Passed == false when live checks fail, got %+v", report.Checks)
+	}
+
+	if c := findCheck(t, report.Checks, "caddy_admin"); c.Status != DoctorStatusFail {
+		t.Fatalf("expected caddy_admin fail, got %+v", c)
+	}
+	if c := findCheck(t, report.Checks, "daemon_healthz"); c.Status != DoctorStatusFail {
+		t.Fatalf("expected daemon_healthz fail, got %+v", c)
 	}
 }

@@ -125,9 +125,34 @@ func TestHandlerWithAuth(t *testing.T) {
 		wantStatus int
 	}{
 		{
+			name:       "root ui open without token",
+			method:     http.MethodGet,
+			path:       "/",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "ui route open without token",
+			method:     http.MethodGet,
+			path:       "/ui",
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:       "healthz open without token",
 			method:     http.MethodGet,
 			path:       "/healthz",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "v1 events missing header",
+			method:     http.MethodGet,
+			path:       "/v1/events",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "v1 events valid token",
+			method:     http.MethodGet,
+			path:       "/v1/events",
+			authHeader: "Bearer top-secret",
 			wantStatus: http.StatusOK,
 		},
 		{

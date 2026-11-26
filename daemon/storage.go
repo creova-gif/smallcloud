@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,8 +44,28 @@ func (s *StorageManager) ReplicaDir() string {
 	return s.replicaDir
 }
 
+func (s *StorageManager) tenantDir(orgID, appName string) string {
+	return filepath.Join(s.replicaDir, orgID, appName)
+}
+
 func (s *StorageManager) replicaPath(orgID, appName string) string {
-	return filepath.Join(s.replicaDir, orgID, appName, "replica.db")
+	return filepath.Join(s.tenantDir(orgID, appName), "replica.db")
+}
+
+func (s *StorageManager) snapshotPath(orgID, appName string, generation int) string {
+	return filepath.Join(s.tenantDir(orgID, appName), fmt.Sprintf("snapshot-%d.db", generation))
+}
+
+func parseSnapshotGeneration(name string) (int, bool) {
+	if !strings.HasPrefix(name, "snapshot-") || !strings.HasSuffix(name, ".db") {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(name, "snapshot-"), ".db")
+	gen, err := strconv.Atoi(raw)
+	if err != nil || gen <= 0 {
+		return 0, false
+	}
+	return gen, true
 }
 
 func (s *StorageManager) HasReplica(orgID, appName string) bool {
@@ -129,12 +151,32 @@ func (s *StorageManager) SyncWAL(orgID, appName, sqliteHostPath string) (*Snapsh
 	}
 
 	key := tenantKey(orgID, appName)
+	if s.generations[key] == 0 {
+		if existing, err := s.listSnapshotsLocked(orgID, appName); err == nil && len(existing) > 0 {
+			s.generations[key] = existing[0].Generation
+		}
+	}
 	s.generations[key]++
+	gen := s.generations[key]
+
+	snapDest := s.snapshotPath(orgID, appName, gen)
+	snapSrc, err := os.Open(dest)
+	if err != nil {
+		return nil, fmt.Errorf("reopen replica %q: %w", dest, err)
+	}
+	_, _, snapErr := writeFileAtomicFromReader(snapDest, snapSrc, 0o600)
+	_ = snapSrc.Close()
+	if snapErr != nil {
+		return nil, snapErr
+	}
+	if err := writeFileAtomic(snapDest+".sha256", []byte(hexSum+"\n"), 0o600); err != nil {
+		return nil, err
+	}
 
 	return &SnapshotMetadata{
 		OrgID:      orgID,
 		AppName:    appName,
-		Generation: s.generations[key],
+		Generation: gen,
 		SizeBytes:  sizeBytes,
 		SHA256:     hexSum,
 		SyncedAt:   time.Now().UTC(),
@@ -210,4 +252,101 @@ func (s *StorageManager) RestoreGenerations(gens map[string]int) {
 	for k, v := range gens {
 		s.generations[k] = v
 	}
+}
+
+func (m *StorageManager) listSnapshotsLocked(orgID, appName string) ([]SnapshotMetadata, error) {
+	dir := m.tenantDir(orgID, appName)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return []SnapshotMetadata{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot dir %q: %w", dir, err)
+	}
+
+	snapshots := make([]SnapshotMetadata, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		gen, ok := parseSnapshotGeneration(entry.Name())
+		if !ok {
+			continue
+		}
+		sidecarBytes, err := os.ReadFile(filepath.Join(dir, entry.Name()+".sha256"))
+		if err != nil {
+			continue
+		}
+		sha := strings.TrimSpace(string(sidecarBytes))
+		if sha == "" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		snapshots = append(snapshots, SnapshotMetadata{
+			OrgID:      orgID,
+			AppName:    appName,
+			Generation: gen,
+			SizeBytes:  info.Size(),
+			SHA256:     sha,
+			SyncedAt:   info.ModTime().UTC(),
+		})
+	}
+
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].Generation != snapshots[j].Generation {
+			return snapshots[i].Generation > snapshots[j].Generation
+		}
+		return snapshots[i].SyncedAt.After(snapshots[j].SyncedAt)
+	})
+
+	return snapshots, nil
+}
+
+func (m *StorageManager) ListSnapshots(orgID, appName string) ([]SnapshotMetadata, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.listSnapshotsLocked(orgID, appName)
+}
+
+func (m *StorageManager) PruneSnapshots(orgID, appName string, keepLast int) (int, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return 0, err
+	}
+	if keepLast < 1 {
+		return 0, fmt.Errorf("keepLast must be >= 1, got %d", keepLast)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snapshots, err := m.listSnapshotsLocked(orgID, appName)
+	if err != nil {
+		return 0, err
+	}
+	if len(snapshots) <= keepLast {
+		return 0, nil
+	}
+
+	pruned := 0
+	for _, snap := range snapshots[keepLast:] {
+		snapPath := m.snapshotPath(orgID, appName, snap.Generation)
+		if err := os.Remove(snapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return pruned, fmt.Errorf("remove snapshot %q: %w", snapPath, err)
+		}
+		sidecarPath := snapPath + ".sha256"
+		if err := os.Remove(sidecarPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return pruned, fmt.Errorf("remove snapshot sidecar %q: %w", sidecarPath, err)
+		}
+		pruned++
+	}
+
+	return pruned, nil
 }
