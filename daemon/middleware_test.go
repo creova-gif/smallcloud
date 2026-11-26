@@ -322,3 +322,115 @@ func TestClientIPAndTrustedProxyRateLimiting(t *testing.T) {
 		t.Fatalf("expected repeat proxied client 203.0.113.50 to be rate-limited, got %d", recP1Again.Code)
 	}
 }
+
+func TestRejectFormContentTypeMiddleware(t *testing.T) {
+	h := RejectFormContentTypeMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name        string
+		method      string
+		path        string
+		contentType string
+		wantStatus  int
+	}{
+		{
+			name:        "text plain on deploy rejected",
+			method:      http.MethodPost,
+			path:        "/v1/deploy",
+			contentType: "text/plain",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "text plain with charset case insensitive rejected",
+			method:      http.MethodPost,
+			path:        "/v1/deploy",
+			contentType: "Text/Plain; charset=utf-8",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "form urlencoded on deploy rejected",
+			method:      http.MethodPost,
+			path:        "/v1/deploy",
+			contentType: "application/x-www-form-urlencoded",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "multipart form data on deploy rejected",
+			method:      http.MethodPost,
+			path:        "/v1/deploy",
+			contentType: "multipart/form-data; boundary=----boundary",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "put with form urlencoded rejected",
+			method:      http.MethodPut,
+			path:        "/v1/deploy",
+			contentType: "application/x-www-form-urlencoded",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "patch with text plain rejected",
+			method:      http.MethodPatch,
+			path:        "/v1/deploy",
+			contentType: "text/plain",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "application json on deploy allowed",
+			method:      http.MethodPost,
+			path:        "/v1/deploy",
+			contentType: "application/json",
+			wantStatus:  http.StatusOK,
+		},
+		{
+			name:        "empty content type on deploy allowed",
+			method:      http.MethodPost,
+			path:        "/v1/deploy",
+			contentType: "",
+			wantStatus:  http.StatusOK,
+		},
+		{
+			name:        "restore path exempt",
+			method:      http.MethodPost,
+			path:        "/v1/restore",
+			contentType: "multipart/form-data; boundary=----boundary",
+			wantStatus:  http.StatusOK,
+		},
+		{
+			name:        "get request exempt",
+			method:      http.MethodGet,
+			path:        "/v1/apps",
+			contentType: "text/plain",
+			wantStatus:  http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusUnsupportedMediaType {
+				if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+					t.Fatalf("expected Content-Type application/json, got %q", ct)
+				}
+				var errBody map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+					t.Fatalf("unmarshal 415 body: %v", err)
+				}
+				if errBody["error"] != "unsupported content-type; expected application/json" {
+					t.Fatalf("expected error 'unsupported content-type; expected application/json', got %q", errBody["error"])
+				}
+			}
+		})
+	}
+}

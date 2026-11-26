@@ -73,6 +73,18 @@ smallcloud deploy ./my-app v1.0.0
 smallcloud status ./my-app
 ```
 
+### Docker Compose Quickstart
+
+Run a local production-style stack (`smallcloud` control-plane daemon + `caddy` reverse proxy) with persistent state:
+
+```bash
+cp .env.example .env
+docker compose up -d
+```
+
+- **Control-plane daemon**: `http://127.0.0.1:7420` (health check at `/healthz`, persistent state in the `smallcloud_state` named volume at `/var/lib/smallcloud`).
+- **Caddy reverse proxy**: Routes `control.smallcloud.local` on ports `80`/`443` to `smallcloud:7420` using [Caddyfile.example](Caddyfile.example) with `zstd`/`gzip` compression and security headers.
+
 ## CLI Command Reference
 
 | Command | Description | Example |

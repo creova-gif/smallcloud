@@ -244,3 +244,34 @@ func TestCaddyRouterSetCanaryWeightApplierRollbackAndReset(t *testing.T) {
 		t.Fatalf("expected CanaryWeight reset to 0 on Rollback, got %d", rolled.CanaryWeight)
 	}
 }
+
+func TestRenderCaddyfileExactOutput(t *testing.T) {
+	halted := RenderCaddyfile(RouteEntry{
+		Domain: "halted.acme.example",
+		Halted: true,
+	}, "")
+	wantHalted := "halted.acme.example {\n\theader Retry-After 3600\n\trespond \"402 Payment Required: SmallCloud monthly spend cap reached\" 402\n}\n"
+	if halted != wantHalted {
+		t.Fatalf("halted mismatch:\ngot:\n%q\nwant:\n%q", halted, wantHalted)
+	}
+
+	normal := RenderCaddyfile(RouteEntry{
+		Domain:         "api.acme.example",
+		ActiveUpstream: "127.0.0.1:9002",
+	}, "")
+	wantNormal := "api.acme.example {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:9002 {\n\t\thealth_uri /healthz\n\t\thealth_interval 5s\n\t\tlb_try_duration 2s\n\t}\n}\n"
+	if normal != wantNormal {
+		t.Fatalf("normal mismatch:\ngot:\n%q\nwant:\n%q", normal, wantNormal)
+	}
+
+	canary := RenderCaddyfile(RouteEntry{
+		Domain:          "api.acme.example",
+		ActiveUpstream:  "127.0.0.1:9002",
+		StandbyUpstream: "127.0.0.1:9001",
+		CanaryWeight:    20,
+	}, "/readyz")
+	wantCanary := "api.acme.example {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:9002 127.0.0.1:9001 {\n\t\tlb_policy weighted_round_robin 80 20\n\t\thealth_uri /readyz\n\t\thealth_interval 5s\n\t\tlb_try_duration 2s\n\t}\n}\n"
+	if canary != wantCanary {
+		t.Fatalf("canary mismatch:\ngot:\n%q\nwant:\n%q", canary, wantCanary)
+	}
+}

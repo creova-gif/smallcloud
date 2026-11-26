@@ -21,6 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Control-Plane Load Tests**: Added `daemon/load_test.go` exercising concurrent control-plane workloads.
 - **Environment Template & Repository Governance**: Added `.env.example`, `.github/CODEOWNERS`, and `.github/dependabot.yml`.
 - **ADR-002 & Production Deployment Runbook**: Added `docs/adr/002-control-plane-hardening-and-dr.md` and `docs/DEPLOYMENT.md`.
+- **`RenderCaddyfile` Allocation Optimization**: Reduced string allocations in `daemon.RenderCaddyfile` when rendering Caddyfile route blocks.
+- **Form Content-Type Rejection Middleware**: Added `RejectFormContentTypeMiddleware` to reject form-encoded requests with HTTP `415 Unsupported Media Type` on JSON API endpoints.
+- **Local Production-Style Compose Stack**: Added `docker-compose.yml` (`smallcloud` daemon with `/healthz` healthcheck and `smallcloud_state` volume + `caddy:2-alpine` reverse proxy) and `Caddyfile.example` routing `control.smallcloud.local` with `encode zstd gzip` and security headers.
 
 ## [v0.2.0] - 2026-11-26
 

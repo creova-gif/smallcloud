@@ -1,0 +1,17 @@
+control.smallcloud.local {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	reverse_proxy smallcloud:7420 {
+		health_uri /healthz
+		health_interval 10s
+		health_timeout 3s
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -370,32 +371,34 @@ func (r *CaddyRouter) RestoreRoutes(routes map[string]*RouteEntry) {
 }
 
 func RenderCaddyfile(entry RouteEntry, healthPath string) string {
+	var b strings.Builder
+	b.Grow(512)
 	if entry.Halted {
-		return fmt.Sprintf("%s {\n\theader Retry-After 3600\n\trespond \"402 Payment Required: SmallCloud monthly spend cap reached\" 402\n}\n", entry.Domain)
+		b.WriteString(entry.Domain)
+		b.WriteString(" {\n\theader Retry-After 3600\n\trespond \"402 Payment Required: SmallCloud monthly spend cap reached\" 402\n}\n")
+		return b.String()
 	}
 	if healthPath == "" {
 		healthPath = "/healthz"
 	}
+	b.WriteString(entry.Domain)
+	b.WriteString(" {\n\tencode zstd gzip\n\treverse_proxy ")
+	b.WriteString(entry.ActiveUpstream)
 	if entry.CanaryWeight > 0 && entry.StandbyUpstream != "" {
 		activeWeight := 100 - entry.CanaryWeight
-		return fmt.Sprintf(`%s {
-	encode zstd gzip
-	reverse_proxy %s %s {
-		lb_policy weighted_round_robin %d %d
-		health_uri %s
-		health_interval 5s
-		lb_try_duration 2s
+		b.WriteByte(' ')
+		b.WriteString(entry.StandbyUpstream)
+		b.WriteString(" {\n\t\tlb_policy weighted_round_robin ")
+		b.WriteString(strconv.Itoa(activeWeight))
+		b.WriteByte(' ')
+		b.WriteString(strconv.Itoa(entry.CanaryWeight))
+		b.WriteString("\n\t\thealth_uri ")
+		b.WriteString(healthPath)
+		b.WriteString("\n\t\thealth_interval 5s\n\t\tlb_try_duration 2s\n\t}\n}\n")
+		return b.String()
 	}
-}
-`, entry.Domain, entry.ActiveUpstream, entry.StandbyUpstream, activeWeight, entry.CanaryWeight, healthPath)
-	}
-	return fmt.Sprintf(`%s {
-	encode zstd gzip
-	reverse_proxy %s {
-		health_uri %s
-		health_interval 5s
-		lb_try_duration 2s
-	}
-}
-`, entry.Domain, entry.ActiveUpstream, healthPath)
+	b.WriteString(" {\n\t\thealth_uri ")
+	b.WriteString(healthPath)
+	b.WriteString("\n\t\thealth_interval 5s\n\t\tlb_try_duration 2s\n\t}\n}\n")
+	return b.String()
 }

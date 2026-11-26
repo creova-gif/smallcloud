@@ -1911,3 +1911,37 @@ func TestTrustedProxyRateLimitOnServer(t *testing.T) {
 		t.Fatalf("expected 429 for untrusted spoofed X-Forwarded-For, got %d: %s", recU2.Code, recU2.Body.String())
 	}
 }
+
+func TestServerRejectsCSRFContentType(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("")
+
+	for _, ct := range []string{
+		"text/plain",
+		"application/x-www-form-urlencoded",
+		"multipart/form-data; boundary=----test",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/deploy", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("content-type %q: expected 415, got %d: %s", ct, rec.Code, rec.Body.String())
+		}
+		var errBody map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+			t.Fatalf("content-type %q: unmarshal 415 body: %v", ct, err)
+		}
+		if errBody["error"] != "unsupported content-type; expected application/json" {
+			t.Fatalf("content-type %q: unexpected error %q", ct, errBody["error"])
+		}
+	}
+
+	jsonReq := httptest.NewRequest(http.MethodPost, "/v1/rollover", strings.NewReader(`{"timestamp":"2099-02-01T00:00:00Z"}`))
+	jsonReq.Header.Set("Content-Type", "application/json")
+	jsonRec := httptest.NewRecorder()
+	h.ServeHTTP(jsonRec, jsonReq)
+	if jsonRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for application/json on /v1/rollover, got %d: %s", jsonRec.Code, jsonRec.Body.String())
+	}
+}

@@ -120,6 +120,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 		})
 	}
 
+	handler = RejectFormContentTypeMiddleware(handler)
 	trustedProxies := ParseTrustedProxies(os.Getenv("SMALLCLOUD_TRUSTED_PROXIES"))
 	handler = RateLimitMiddlewareWithProxies(NewRateLimiter(rateLimitPerMinute(), time.Minute), trustedProxies, nil)(handler)
 	handler = metrics.Middleware(handler)

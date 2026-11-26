@@ -293,3 +293,22 @@ func RateLimitMiddlewareWithProxies(limiter *RateLimiter, trusted []net.IPNet, n
 		})
 	}
 }
+
+func RejectFormContentTypeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) &&
+			strings.HasPrefix(r.URL.Path, "/v1/") &&
+			r.URL.Path != "/v1/restore" {
+			ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+			if ct != "" && (strings.HasPrefix(ct, "text/plain") ||
+				strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+				strings.HasPrefix(ct, "multipart/form-data")) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnsupportedMediaType)
+				_, _ = w.Write([]byte(`{"error": "unsupported content-type; expected application/json"}`))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
