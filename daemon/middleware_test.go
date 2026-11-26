@@ -220,3 +220,97 @@ func TestRateLimitMiddleware(t *testing.T) {
 		t.Fatalf("expected 200 when limiter is nil, got %d", recNil.Code)
 	}
 }
+
+func TestClientIPAndTrustedProxyRateLimiting(t *testing.T) {
+	trusted := ParseTrustedProxies("10.0.0.0/8, 192.168.1.5, invalid-entry")
+	if len(trusted) != 2 {
+		t.Fatalf("expected 2 parsed trusted networks, got %d", len(trusted))
+	}
+
+	untrustedReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	untrustedReq.RemoteAddr = "198.51.100.77:5000"
+	untrustedReq.Header.Set("X-Forwarded-For", "203.0.113.10")
+	untrustedReq.Header.Set("X-Real-IP", "203.0.113.11")
+	if got := ClientIP(untrustedReq, trusted); got != "198.51.100.77" {
+		t.Fatalf("expected untrusted RemoteAddr to ignore forwarded headers, got %q", got)
+	}
+
+	trustedXFFReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	trustedXFFReq.RemoteAddr = "10.1.2.3:8080"
+	trustedXFFReq.Header.Set("X-Forwarded-For", "203.0.113.20, 10.0.0.5")
+	if got := ClientIP(trustedXFFReq, trusted); got != "203.0.113.20" {
+		t.Fatalf("expected trusted proxy to extract 203.0.113.20 from X-Forwarded-For, got %q", got)
+	}
+
+	trustedRealIPReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	trustedRealIPReq.RemoteAddr = "192.168.1.5:9000"
+	trustedRealIPReq.Header.Set("X-Real-IP", "203.0.113.30")
+	if got := ClientIP(trustedRealIPReq, trusted); got != "203.0.113.30" {
+		t.Fatalf("expected single trusted IP to honor X-Real-IP 203.0.113.30, got %q", got)
+	}
+
+	loopbackReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	loopbackReq.RemoteAddr = "127.0.0.1:4321"
+	loopbackReq.Header.Set("X-Forwarded-For", "203.0.113.40")
+	if got := ClientIP(loopbackReq, nil); got != "203.0.113.40" {
+		t.Fatalf("expected loopback RemoteAddr to honor X-Forwarded-For, got %q", got)
+	}
+
+	invalidXFFReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	invalidXFFReq.RemoteAddr = "10.0.0.9:4321"
+	invalidXFFReq.Header.Set("X-Forwarded-For", "not-an-ip")
+	if got := ClientIP(invalidXFFReq, trusted); got != "10.0.0.9" {
+		t.Fatalf("expected invalid X-Forwarded-For to fall back to proxy IP 10.0.0.9, got %q", got)
+	}
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	limiter := NewRateLimiter(1, time.Minute)
+	h := RateLimitMiddlewareWithProxies(limiter, trusted, func() time.Time { return now })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	spoof1 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	spoof1.RemoteAddr = "198.51.100.88:1001"
+	spoof1.Header.Set("X-Forwarded-For", "203.0.113.1")
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, spoof1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected first untrusted request to pass, got %d", rec1.Code)
+	}
+
+	spoof2 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	spoof2.RemoteAddr = "198.51.100.88:1002"
+	spoof2.Header.Set("X-Forwarded-For", "203.0.113.2")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, spoof2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected second untrusted request with spoofed X-Forwarded-For to be rate-limited, got %d", rec2.Code)
+	}
+
+	proxy1 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	proxy1.RemoteAddr = "10.2.3.4:2001"
+	proxy1.Header.Set("X-Forwarded-For", "203.0.113.50")
+	recP1 := httptest.NewRecorder()
+	h.ServeHTTP(recP1, proxy1)
+	if recP1.Code != http.StatusOK {
+		t.Fatalf("expected first proxied client to pass, got %d", recP1.Code)
+	}
+
+	proxy2 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	proxy2.RemoteAddr = "10.2.3.4:2002"
+	proxy2.Header.Set("X-Forwarded-For", "203.0.113.51")
+	recP2 := httptest.NewRecorder()
+	h.ServeHTTP(recP2, proxy2)
+	if recP2.Code != http.StatusOK {
+		t.Fatalf("expected second distinct proxied client to pass, got %d", recP2.Code)
+	}
+
+	proxy1Again := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	proxy1Again.RemoteAddr = "10.2.3.4:2003"
+	proxy1Again.Header.Set("X-Real-IP", "203.0.113.50")
+	recP1Again := httptest.NewRecorder()
+	h.ServeHTTP(recP1Again, proxy1Again)
+	if recP1Again.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected repeat proxied client 203.0.113.50 to be rate-limited, got %d", recP1Again.Code)
+	}
+}

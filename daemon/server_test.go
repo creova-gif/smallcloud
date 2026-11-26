@@ -1810,3 +1810,55 @@ func TestSelectNodeEndpoint(t *testing.T) {
 		t.Fatalf("expected 503 for unmatched region, got %d: %s", missRec.Code, missRec.Body.String())
 	}
 }
+
+func TestTrustedProxyRateLimitOnServer(t *testing.T) {
+	t.Setenv("SMALLCLOUD_RATE_LIMIT", "1")
+	t.Setenv("SMALLCLOUD_TRUSTED_PROXIES", "10.10.0.0/16")
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("")
+
+	reqA1 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	reqA1.RemoteAddr = "10.10.1.5:3001"
+	reqA1.Header.Set("X-Forwarded-For", "203.0.113.100")
+	recA1 := httptest.NewRecorder()
+	h.ServeHTTP(recA1, reqA1)
+	if recA1.Code != http.StatusOK {
+		t.Fatalf("expected 200 for first request from 203.0.113.100, got %d: %s", recA1.Code, recA1.Body.String())
+	}
+
+	reqB1 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	reqB1.RemoteAddr = "10.10.1.5:3002"
+	reqB1.Header.Set("X-Forwarded-For", "203.0.113.101")
+	recB1 := httptest.NewRecorder()
+	h.ServeHTTP(recB1, reqB1)
+	if recB1.Code != http.StatusOK {
+		t.Fatalf("expected 200 for first request from 203.0.113.101, got %d: %s", recB1.Code, recB1.Body.String())
+	}
+
+	reqA2 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	reqA2.RemoteAddr = "10.10.1.6:3003"
+	reqA2.Header.Set("X-Forwarded-For", "203.0.113.100")
+	recA2 := httptest.NewRecorder()
+	h.ServeHTTP(recA2, reqA2)
+	if recA2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for second request from 203.0.113.100, got %d: %s", recA2.Code, recA2.Body.String())
+	}
+
+	untrusted1 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	untrusted1.RemoteAddr = "198.51.100.40:4001"
+	untrusted1.Header.Set("X-Forwarded-For", "203.0.113.200")
+	recU1 := httptest.NewRecorder()
+	h.ServeHTTP(recU1, untrusted1)
+	if recU1.Code != http.StatusOK {
+		t.Fatalf("expected 200 for first untrusted request, got %d: %s", recU1.Code, recU1.Body.String())
+	}
+
+	untrusted2 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	untrusted2.RemoteAddr = "198.51.100.40:4002"
+	untrusted2.Header.Set("X-Forwarded-For", "203.0.113.201")
+	recU2 := httptest.NewRecorder()
+	h.ServeHTTP(recU2, untrusted2)
+	if recU2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for untrusted spoofed X-Forwarded-For, got %d: %s", recU2.Code, recU2.Body.String())
+	}
+}

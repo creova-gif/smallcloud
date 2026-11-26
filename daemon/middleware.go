@@ -177,7 +177,92 @@ func (m *HTTPMetrics) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+func ParseTrustedProxies(raw string) []net.IPNet {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var nets []net.IPNet
+	for _, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, ipNet, err := net.ParseCIDR(entry); err == nil && ipNet != nil {
+				nets = append(nets, *ipNet)
+			}
+			continue
+		}
+		if ip := net.ParseIP(entry); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				nets = append(nets, net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)})
+			} else {
+				nets = append(nets, net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+			}
+		}
+	}
+	return nets
+}
+
+func isTrustedProxy(ip net.IP, trusted []net.IPNet) bool {
+	if ip == nil {
+		return false
+	}
+	for i := range trusted {
+		if trusted[i].Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func ClientIP(r *http.Request, trusted []net.IPNet) string {
+	remoteHost := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		remoteHost = host
+	}
+	remoteHost = strings.TrimSpace(remoteHost)
+	remoteIP := net.ParseIP(strings.Trim(remoteHost, "[]"))
+	if remoteIP == nil {
+		return remoteHost
+	}
+
+	if remoteIP.IsLoopback() || isTrustedProxy(remoteIP, trusted) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			var firstValid net.IP
+			for _, part := range parts {
+				if ip := net.ParseIP(strings.TrimSpace(part)); ip != nil {
+					firstValid = ip
+					break
+				}
+			}
+			for i := len(parts) - 1; i >= 0; i-- {
+				ip := net.ParseIP(strings.TrimSpace(parts[i]))
+				if ip != nil && !ip.IsLoopback() && !isTrustedProxy(ip, trusted) {
+					return ip.String()
+				}
+			}
+			if firstValid != nil {
+				return firstValid.String()
+			}
+		}
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+			if ip := net.ParseIP(xri); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+
+	return remoteIP.String()
+}
+
 func RateLimitMiddleware(limiter *RateLimiter, nowFn func() time.Time) func(http.Handler) http.Handler {
+	return RateLimitMiddlewareWithProxies(limiter, nil, nowFn)
+}
+
+func RateLimitMiddlewareWithProxies(limiter *RateLimiter, trusted []net.IPNet, nowFn func() time.Time) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if limiter == nil {
 			return next
@@ -188,10 +273,7 @@ func RateLimitMiddleware(limiter *RateLimiter, nowFn func() time.Time) func(http
 				return
 			}
 
-			key := r.RemoteAddr
-			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-				key = host
-			}
+			key := ClientIP(r, trusted)
 
 			now := time.Now()
 			if nowFn != nil {

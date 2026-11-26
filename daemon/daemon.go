@@ -61,19 +61,20 @@ type DeploymentResult struct {
 }
 
 type Daemon struct {
-	mu        sync.Mutex
-	metaMu    sync.RWMutex
-	budget    *BudgetTracker
-	cgroups   *CgroupManager
-	storage   *StorageManager
-	router    *CaddyRouter
-	runtime   ContainerRuntime
-	notifier  *WebhookNotifier
-	audit     *AuditLog
-	pool      *WorkerPool
-	seq       int
-	appMeta   map[string]AppMeta
-	snapshots map[string]*SnapshotMetadata
+	mu          sync.Mutex
+	metaMu      sync.RWMutex
+	tenantLocks sync.Map
+	budget      *BudgetTracker
+	cgroups     *CgroupManager
+	storage     *StorageManager
+	router      *CaddyRouter
+	runtime     ContainerRuntime
+	notifier    *WebhookNotifier
+	audit       *AuditLog
+	pool        *WorkerPool
+	seq         int
+	appMeta     map[string]AppMeta
+	snapshots   map[string]*SnapshotMetadata
 }
 
 func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
@@ -244,6 +245,14 @@ func (d *Daemon) recordSnapshot(orgID, appName string, snap *SnapshotMetadata) {
 	d.metaMu.Unlock()
 }
 
+func (d *Daemon) lockTenant(orgID, appName string) func() {
+	key := tenantKey(orgID, appName)
+	val, _ := d.tenantLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult, error) {
 	if cfg == nil {
 		return nil, errors.New("config is required")
@@ -253,8 +262,8 @@ func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	unlock := d.lockTenant(cfg.App.OrgID, cfg.App.Name)
+	defer unlock()
 
 	if err := d.budget.RegisterApp(cfg.App.OrgID, cfg.App.Name, cfg.Budget.MaxMonthlyUSD, cfg.Budget.AlertAtPct); err != nil {
 		return nil, err
@@ -284,11 +293,14 @@ func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult
 		return nil, err
 	}
 
+	d.mu.Lock()
 	d.seq++
+	seq := d.seq
+	d.mu.Unlock()
 	if releaseID == "" {
-		releaseID = fmt.Sprintf("rel-%d", d.seq)
+		releaseID = fmt.Sprintf("rel-%d", seq)
 	}
-	upstreamPort := 18000 + d.seq
+	upstreamPort := 18000 + seq
 
 	coldStartBegin := time.Now()
 	rt := d.Runtime()
@@ -345,8 +357,8 @@ func (d *Daemon) Rollback(orgID, appName string) (RouteEntry, error) {
 		return RouteEntry{}, err
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	unlock := d.lockTenant(orgID, appName)
+	defer unlock()
 
 	if err := d.budget.CheckAllowed(orgID, appName); err != nil {
 		if _, ok := d.router.GetRoute(orgID, appName); !ok {
@@ -480,8 +492,8 @@ func (d *Daemon) DeleteApp(orgID, appName string) error {
 		return err
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	unlock := d.lockTenant(orgID, appName)
+	defer unlock()
 
 	key := tenantKey(orgID, appName)
 	route, hasRoute := d.router.GetRoute(orgID, appName)

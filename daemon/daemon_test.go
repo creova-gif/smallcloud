@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -628,5 +629,111 @@ func TestDaemonStateChecksumAndBackupFallback(t *testing.T) {
 	route4, ok := d4.Router().GetRoute(cfg.App.OrgID, cfg.App.Name)
 	if !ok || route4.ActiveReleaseID != "v1.0.0" {
 		t.Fatalf("expected recovered route v1.0.0 on missing primary, got ok=%v route=%+v", ok, route4)
+	}
+}
+
+type blockingTenantRuntime struct {
+	blockOrg    string
+	startedCh   chan struct{}
+	unblockCh   chan struct{}
+	startedOnce sync.Once
+}
+
+func (r *blockingTenantRuntime) Start(_ context.Context, spec ContainerSpec) (string, error) {
+	if spec.OrgID == r.blockOrg {
+		r.startedOnce.Do(func() {
+			close(r.startedCh)
+		})
+		<-r.unblockCh
+	}
+	return fmt.Sprintf("127.0.0.1:%d", spec.Port), nil
+}
+
+func (r *blockingTenantRuntime) Stop(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (r *blockingTenantRuntime) Logs(_ context.Context, _, _, _ string, _ int) (string, error) {
+	return "", nil
+}
+
+func TestDaemonConcurrentMultiTenantDeploys(t *testing.T) {
+	d := NewDaemon(t.TempDir(), t.TempDir())
+	rt := &blockingTenantRuntime{
+		blockOrg:  "org-a",
+		startedCh: make(chan struct{}),
+		unblockCh: make(chan struct{}),
+	}
+	d.SetRuntime(rt)
+
+	cfgA := sampleConfig()
+	cfgA.App.OrgID = "org-a"
+	cfgA.App.Name = "app-a"
+	cfgA.App.Domain = "a.smallcloud.dev"
+
+	cfgB := sampleConfig()
+	cfgB.App.OrgID = "org-b"
+	cfgB.App.Name = "app-b"
+	cfgB.App.Domain = "b.smallcloud.dev"
+
+	type deployOutcome struct {
+		res *DeploymentResult
+		err error
+	}
+
+	orgACh := make(chan deployOutcome, 1)
+	go func() {
+		res, err := d.Deploy(cfgA, "v1.0.0")
+		orgACh <- deployOutcome{res: res, err: err}
+	}()
+
+	select {
+	case <-rt.startedCh:
+	case <-time.After(5 * time.Second):
+		close(rt.unblockCh)
+		t.Fatal("timed out waiting for org-a Start to be called")
+	}
+
+	orgBCh := make(chan deployOutcome, 1)
+	go func() {
+		res, err := d.Deploy(cfgB, "v1.0.0")
+		orgBCh <- deployOutcome{res: res, err: err}
+	}()
+
+	var resB deployOutcome
+	select {
+	case resB = <-orgBCh:
+	case <-time.After(5 * time.Second):
+		close(rt.unblockCh)
+		t.Fatal("org-b deploy blocked behind org-a")
+	}
+	if resB.err != nil {
+		close(rt.unblockCh)
+		t.Fatalf("org-b deploy failed: %v", resB.err)
+	}
+	if resB.res.OrgID != "org-b" || resB.res.ReleaseID != "v1.0.0" {
+		close(rt.unblockCh)
+		t.Fatalf("unexpected org-b result: %+v", resB.res)
+	}
+
+	select {
+	case out := <-orgACh:
+		t.Fatalf("org-a completed before unblock: %+v", out)
+	default:
+	}
+
+	close(rt.unblockCh)
+
+	var resA deployOutcome
+	select {
+	case resA = <-orgACh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for org-a deploy after unblock")
+	}
+	if resA.err != nil {
+		t.Fatalf("org-a deploy failed: %v", resA.err)
+	}
+	if resA.res.OrgID != "org-a" || resA.res.ReleaseID != "v1.0.0" {
+		t.Fatalf("unexpected org-a result: %+v", resA.res)
 	}
 }

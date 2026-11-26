@@ -37,6 +37,12 @@ func TestUIDashboardRoutes(t *testing.T) {
 					"Refresh",
 					"/v1/apps",
 					"/v1/events",
+					"/v1/rollback",
+					"/v1/canary/reconcile",
+					"/v1/prune",
+					"Rollback",
+					"Reconcile Canary",
+					"Prune",
 				} {
 					if !strings.Contains(body, want) {
 						t.Fatalf("GET %s body missing %q", path, want)

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security, Concurrency & Operator UI
+- **Per-Tenant Deploy Concurrency Lock**: Added `tenantLocks` in the control-plane daemon to serialize concurrent deployments per tenant while allowing deploys across different tenants to proceed independently.
+- **Trusted Proxy `ClientIP` Rate Limiting**: Added `SMALLCLOUD_TRUSTED_PROXIES` support so `ClientIP` honors `X-Forwarded-For` / `X-Real-IP` headers only from configured trusted proxy IPs or CIDRs when enforcing `RateLimitMiddleware`.
+- **Interactive Operator Web UI Actions**: Added interactive controls in the Operator Web UI for triggering `/v1/rollback`, `/v1/canary/reconcile`, and `/v1/prune`.
+- **CI Vulnerability Scanning**: Added `govulncheck` (`go run golang.org/x/vuln/cmd/govulncheck@latest ./...`) to `.github/workflows/ci.yml`.
+
 ## [v0.2.0] - 2026-11-26
 
 ### Hardening, Observability & Disaster Recovery

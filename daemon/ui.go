@@ -96,6 +96,30 @@ const uiHTML = `<!DOCTYPE html>
     color: #fecaca;
   }
   .banner.visible { display: block; }
+  .banner.success {
+    background: rgba(34, 197, 94, 0.14);
+    border-color: rgba(34, 197, 94, 0.4);
+    color: #bbf7d0;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .btn-sm {
+    padding: 4px 10px;
+    font-size: 0.75rem;
+  }
+  .btn-secondary {
+    background: #1e293b;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .btn-danger {
+    background: rgba(239, 68, 68, 0.18);
+    border: 1px solid rgba(239, 68, 68, 0.45);
+    color: #fecaca;
+  }
   section {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -170,6 +194,7 @@ const uiHTML = `<!DOCTYPE html>
   </header>
 
   <div id="error-banner" class="banner" role="alert"></div>
+  <div id="status-banner" class="banner success" role="status"></div>
 
   <section>
     <div class="section-head">
@@ -194,6 +219,7 @@ const uiHTML = `<!DOCTYPE html>
   var tokenInput = document.getElementById("token-input");
   var refreshBtn = document.getElementById("refresh-btn");
   var errorBanner = document.getElementById("error-banner");
+  var statusBanner = document.getElementById("status-banner");
   var appsContainer = document.getElementById("apps-container");
   var eventsContainer = document.getElementById("events-container");
   var appsCount = document.getElementById("apps-count");
@@ -229,6 +255,16 @@ const uiHTML = `<!DOCTYPE html>
     errorBanner.classList.add("visible");
   }
 
+  function showStatus(msg) {
+    if (!msg) {
+      statusBanner.textContent = "";
+      statusBanner.classList.remove("visible");
+      return;
+    }
+    statusBanner.textContent = msg;
+    statusBanner.classList.add("visible");
+  }
+
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) {
@@ -256,7 +292,7 @@ const uiHTML = `<!DOCTYPE html>
     var table = document.createElement("table");
     var thead = document.createElement("thead");
     var headRow = document.createElement("tr");
-    ["Org", "App", "Active Release", "Color", "Spend / Cap", "Halted"].forEach(function(h) {
+    ["Org", "App", "Active Release", "Color", "Spend / Cap", "Halted", "Actions"].forEach(function(h) {
       headRow.appendChild(el("th", "", h));
     });
     thead.appendChild(headRow);
@@ -285,6 +321,33 @@ const uiHTML = `<!DOCTYPE html>
       var haltedCell = document.createElement("td");
       haltedCell.appendChild(el("span", halted ? "badge badge-red" : "badge badge-green", halted ? "halted" : "active"));
       tr.appendChild(haltedCell);
+
+      var actionsCell = document.createElement("td");
+      var actionsWrap = el("div", "actions");
+
+      var rollbackBtn = el("button", "btn-sm btn-danger", "Rollback");
+      rollbackBtn.type = "button";
+      rollbackBtn.addEventListener("click", function() {
+        runAppAction("Rollback", "/v1/rollback", { org_id: app.org_id, app_name: app.app_name }, rollbackBtn);
+      });
+      actionsWrap.appendChild(rollbackBtn);
+
+      var canaryBtn = el("button", "btn-sm btn-secondary", "Reconcile Canary");
+      canaryBtn.type = "button";
+      canaryBtn.addEventListener("click", function() {
+        runAppAction("Reconcile Canary", "/v1/canary/reconcile", { org_id: app.org_id, app_name: app.app_name }, canaryBtn);
+      });
+      actionsWrap.appendChild(canaryBtn);
+
+      var pruneBtn = el("button", "btn-sm btn-secondary", "Prune");
+      pruneBtn.type = "button";
+      pruneBtn.addEventListener("click", function() {
+        runAppAction("Prune", "/v1/prune", { org_id: app.org_id, app_name: app.app_name, keep_last: 5 }, pruneBtn);
+      });
+      actionsWrap.appendChild(pruneBtn);
+
+      actionsCell.appendChild(actionsWrap);
+      tr.appendChild(actionsCell);
 
       tbody.appendChild(tr);
     });
@@ -337,6 +400,50 @@ const uiHTML = `<!DOCTYPE html>
     });
   }
 
+  function postJSON(path, payload) {
+    var headers = Object.assign({ "Content-Type": "application/json" }, authHeaders());
+    return fetch(path, {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify(payload)
+    }).then(function(res) {
+      return res.json().catch(function() { return {}; }).then(function(data) {
+        if (!res.ok) {
+          if (res.status === 401) {
+            throw new Error("Unauthorized (401): enter a valid Bearer token.");
+          }
+          var errMsg = (data && data.error) ? data.error : ("Request to " + path + " failed with status " + res.status);
+          throw new Error(errMsg);
+        }
+        return data;
+      });
+    });
+  }
+
+  function runAppAction(actionName, path, payload, btn) {
+    btn.disabled = true;
+    showError("");
+    showStatus("Running " + actionName + " for " + payload.org_id + "/" + payload.app_name + "...");
+    postJSON(path, payload).then(function(data) {
+      var tenant = payload.org_id + "/" + payload.app_name;
+      var msg = actionName + " completed for " + tenant + ".";
+      if (path === "/v1/prune") {
+        msg = "Pruned " + (data && typeof data.pruned === "number" ? data.pruned : 0) + " snapshot(s) for " + tenant + ".";
+      } else if (path === "/v1/rollback" && data && data.active_color) {
+        msg = "Rolled back " + tenant + " to " + data.active_color + " (" + (data.active_release_id || "-") + ").";
+      } else if (path === "/v1/canary/reconcile" && data && (data.action || data.reason)) {
+        msg = "Canary reconcile for " + tenant + ": " + (data.action || "completed") + (data.reason ? " (" + data.reason + ")" : "") + ".";
+      }
+      showStatus(msg);
+      refreshAll();
+    }).catch(function(err) {
+      showStatus("");
+      showError(err && err.message ? err.message : actionName + " failed.");
+    }).finally(function() {
+      btn.disabled = false;
+    });
+  }
+
   function refreshAll() {
     refreshBtn.disabled = true;
     showError("");
@@ -353,7 +460,10 @@ const uiHTML = `<!DOCTYPE html>
     });
   }
 
-  refreshBtn.addEventListener("click", refreshAll);
+  refreshBtn.addEventListener("click", function() {
+    showStatus("");
+    refreshAll();
+  });
   refreshAll();
 })();
 </script>
