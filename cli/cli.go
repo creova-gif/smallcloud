@@ -188,12 +188,30 @@ func RunEvalSuite(workDir string) (*EvalReport, error) {
 func runInit(args []string, stdout io.Writer) error {
 	dir := "."
 	force := false
-	for _, a := range args {
-		if a == "--force" {
+	tmpl := "fastapi"
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--force":
 			force = true
-		} else {
+		case a == "--template" && i+1 < len(args):
+			tmpl = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--template="):
+			tmpl = strings.TrimPrefix(a, "--template=")
+		case !strings.HasPrefix(a, "-"):
 			dir = a
 		}
+	}
+
+	var port int
+	switch tmpl {
+	case "fastapi":
+		port = 8000
+	case "node", "go":
+		port = 8080
+	default:
+		return fmt.Errorf("unsupported template %q (expected fastapi, node, or go)", tmpl)
 	}
 
 	tomlPath := filepath.Join(dir, "smallcloud.toml")
@@ -216,7 +234,7 @@ func runInit(args []string, stdout io.Writer) error {
 name = %q
 org_id = "org-indie-default"
 domain = "%s.smallcloud.dev"
-port = 8000
+port = %d
 healthcheck = "/healthz"
 runtime = "dockerfile"
 
@@ -233,7 +251,7 @@ hard_stop = true
 sqlite_path = "/data/app.db"
 replica_url = "gs://smallcloud-replicas/org-indie-default/%s"
 sync_ms = 1000
-`, appName, appName, appName)
+`, appName, appName, port, appName)
 
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
@@ -241,7 +259,11 @@ sync_ms = 1000
 	if err := os.WriteFile(tomlPath, []byte(starter), 0o600); err != nil {
 		return err
 	}
-	return writeJSON(stdout, map[string]string{"initialized": tomlPath, "app_name": appName})
+	return writeJSON(stdout, map[string]string{
+		"initialized": tomlPath,
+		"app_name":    appName,
+		"template":    tmpl,
+	})
 }
 
 func runBudget(args []string, d *daemon.Daemon, client *DaemonClient, statePath string, stdout io.Writer) error {
@@ -377,6 +399,12 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 	if caddyURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_CADDY_ADMIN_URL")); caddyURL != "" {
 		d.Router().SetApplier(daemon.HTTPAdminApplier{AdminURL: caddyURL})
 	}
+	if webhookURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_WEBHOOK_URL")); webhookURL != "" {
+		d.SetWebhookNotifier(&daemon.WebhookNotifier{
+			URL:    webhookURL,
+			Secret: os.Getenv("SMALLCLOUD_WEBHOOK_SECRET"),
+		})
+	}
 	if strings.TrimSpace(os.Getenv("SMALLCLOUD_RUNTIME")) == "docker" {
 		rt := &daemon.DockerRuntime{}
 		if probeTimeout > 0 {
@@ -453,7 +481,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|meter|rollover|list|destroy|events|logs|canary|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -523,7 +551,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -625,6 +653,40 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	case "budget":
 		return runBudget(args[1:], d, client, statePath, stdout)
 
+	case "org-quota":
+		if len(args) < 2 {
+			return errors.New("usage: smallcloud org-quota <org_id> [max_monthly_usd]")
+		}
+		orgID := args[1]
+		if len(args) >= 3 {
+			maxMonthlyUSD, err := strconv.ParseFloat(args[2], 64)
+			if err != nil {
+				return fmt.Errorf("invalid max_monthly_usd %q: %w", args[2], err)
+			}
+			if client != nil {
+				summary, err := client.SetOrgQuota(context.Background(), orgID, maxMonthlyUSD)
+				if err != nil {
+					return err
+				}
+				return writeJSON(stdout, summary)
+			}
+			if err := d.Budget().SetOrgQuota(orgID, maxMonthlyUSD); err != nil {
+				return err
+			}
+			if err := d.SaveState(statePath); err != nil {
+				return err
+			}
+			return writeJSON(stdout, d.Budget().OrgSummary(orgID))
+		}
+		if client != nil {
+			summary, err := client.OrgSummary(context.Background(), orgID)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, summary)
+		}
+		return writeJSON(stdout, d.Budget().OrgSummary(orgID))
+
 	case "meter":
 		return runMeter(args[1:], d, client, statePath, stdout)
 
@@ -719,16 +781,32 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if releaseID == "" {
-			st, err := d.Status(cfg.App.OrgID, cfg.App.Name)
+		var logs string
+		if client != nil {
+			ctx := context.Background()
+			if releaseID == "" {
+				st, err := client.Status(ctx, cfg.App.OrgID, cfg.App.Name)
+				if err != nil {
+					return err
+				}
+				releaseID = st.Route.ActiveReleaseID
+			}
+			logs, err = client.Logs(ctx, cfg.App.OrgID, cfg.App.Name, releaseID, 100)
 			if err != nil {
 				return err
 			}
-			releaseID = st.Route.ActiveReleaseID
-		}
-		logs, err := d.Runtime().Logs(context.Background(), cfg.App.OrgID, cfg.App.Name, releaseID, 100)
-		if err != nil {
-			return err
+		} else {
+			if releaseID == "" {
+				st, err := d.Status(cfg.App.OrgID, cfg.App.Name)
+				if err != nil {
+					return err
+				}
+				releaseID = st.Route.ActiveReleaseID
+			}
+			logs, err = d.Runtime().Logs(context.Background(), cfg.App.OrgID, cfg.App.Name, releaseID, 100)
+			if err != nil {
+				return err
+			}
 		}
 		return writeJSON(stdout, map[string]string{
 			"org_id":     cfg.App.OrgID,
@@ -755,6 +833,13 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if client != nil {
+			route, err := client.SetCanaryWeight(context.Background(), cfg.App.OrgID, cfg.App.Name, pct)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, route)
+		}
 		route, err := d.Router().SetCanaryWeight(cfg.App.OrgID, cfg.App.Name, pct)
 		if err != nil {
 			return err
@@ -763,6 +848,49 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			return err
 		}
 		return writeJSON(stdout, route)
+
+	case "prune":
+		dir := "."
+		keepLast := 5
+		switch len(args) {
+		case 2:
+			if v, err := strconv.Atoi(args[1]); err == nil {
+				keepLast = v
+			} else {
+				dir = args[1]
+			}
+		default:
+			if len(args) >= 3 {
+				dir = args[1]
+				v, err := strconv.Atoi(args[2])
+				if err != nil {
+					return fmt.Errorf("invalid keep_last %q: %w", args[2], err)
+				}
+				keepLast = v
+			}
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		var pruned int
+		if client != nil {
+			pruned, err = client.PruneSnapshots(context.Background(), cfg.App.OrgID, cfg.App.Name, keepLast)
+			if err != nil {
+				return err
+			}
+		} else {
+			pruned, err = d.Storage().PruneSnapshots(cfg.App.OrgID, cfg.App.Name, keepLast)
+			if err != nil {
+				return err
+			}
+		}
+		return writeJSON(stdout, map[string]any{
+			"org_id":    cfg.App.OrgID,
+			"app_name":  cfg.App.Name,
+			"keep_last": keepLast,
+			"pruned":    pruned,
+		})
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)

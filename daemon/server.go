@@ -39,6 +39,23 @@ type rolloverRequest struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+type canaryRequest struct {
+	OrgID        string `json:"org_id"`
+	AppName      string `json:"app_name"`
+	CanaryWeight int    `json:"canary_weight"`
+}
+
+type orgQuotaRequest struct {
+	OrgID         string  `json:"org_id"`
+	MaxMonthlyUSD float64 `json:"max_monthly_usd"`
+}
+
+type pruneRequest struct {
+	OrgID    string `json:"org_id"`
+	AppName  string `json:"app_name"`
+	KeepLast int    `json:"keep_last"`
+}
+
 func (d *Daemon) Handler() http.Handler {
 	return d.HandlerWithAuth(os.Getenv("SMALLCLOUD_API_TOKEN"))
 }
@@ -51,11 +68,16 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
+	mux.HandleFunc("POST /v1/canary", d.handleCanary)
 	mux.HandleFunc("GET /v1/apps", d.handleListApps)
 	mux.HandleFunc("DELETE /v1/apps", d.handleDeleteApp)
 	mux.HandleFunc("GET /v1/status", d.handleStatus)
+	mux.HandleFunc("GET /v1/logs", d.handleLogs)
 	mux.HandleFunc("GET /v1/events", d.handleEvents)
 	mux.HandleFunc("POST /v1/meter", d.handleMeter)
+	mux.HandleFunc("POST /v1/org-quota", d.handleSetOrgQuota)
+	mux.HandleFunc("GET /v1/org-quota", d.handleGetOrgQuota)
+	mux.HandleFunc("POST /v1/prune", d.handlePrune)
 	mux.HandleFunc("POST /v1/rollover", d.handleRollover)
 
 	if token == "" {
@@ -324,6 +346,118 @@ func (d *Daemon) handleRollover(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
 		"rolled_over": count,
 		"month":       ts.UTC().Format("2006-01"),
+	})
+}
+
+func (d *Daemon) handleCanary(w http.ResponseWriter, r *http.Request) {
+	var req canaryRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	route, err := d.SetCanaryWeight(req.OrgID, req.AppName, req.CanaryWeight)
+	if err != nil {
+		if errors.Is(err, ErrNoRouteFound) {
+			writeHTTPError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, route)
+}
+
+func (d *Daemon) handleLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	orgID := q.Get("org_id")
+	appName := q.Get("app")
+	if appName == "" {
+		appName = q.Get("app_name")
+	}
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	tail := 0
+	if rawTail := q.Get("tail"); rawTail != "" {
+		parsed, err := strconv.Atoi(rawTail)
+		if err != nil || parsed < 0 {
+			writeHTTPError(w, http.StatusBadRequest, "tail must be a non-negative integer")
+			return
+		}
+		tail = parsed
+	}
+
+	releaseID := q.Get("release_id")
+	if releaseID == "" {
+		route, ok := d.router.GetRoute(orgID, appName)
+		if !ok || route.ActiveReleaseID == "" {
+			writeHTTPError(w, http.StatusNotFound, fmt.Sprintf("%s for %s/%s", ErrNoRouteFound.Error(), orgID, appName))
+			return
+		}
+		releaseID = route.ActiveReleaseID
+	}
+
+	logs, err := d.AppLogs(r.Context(), orgID, appName, releaseID, tail)
+	if err != nil {
+		if errors.Is(err, ErrNoRouteFound) {
+			writeHTTPError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"org_id":     orgID,
+		"app_name":   appName,
+		"release_id": releaseID,
+		"logs":       logs,
+	})
+}
+
+func (d *Daemon) handleSetOrgQuota(w http.ResponseWriter, r *http.Request) {
+	var req orgQuotaRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if !config.IsValidSlug(req.OrgID) {
+		writeHTTPError(w, http.StatusBadRequest, "org_id must be a valid lowercase alphanumeric slug")
+		return
+	}
+
+	summary, err := d.SetOrgQuota(req.OrgID, req.MaxMonthlyUSD)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, summary)
+}
+
+func (d *Daemon) handleGetOrgQuota(w http.ResponseWriter, r *http.Request) {
+	orgID := r.URL.Query().Get("org_id")
+	summary, err := d.OrgSummary(orgID)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, summary)
+}
+
+func (d *Daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
+	var req pruneRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	pruned, err := d.Storage().PruneSnapshots(req.OrgID, req.AppName, req.KeepLast)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, map[string]int{
+		"pruned": pruned,
 	})
 }
 

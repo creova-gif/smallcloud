@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -183,5 +185,130 @@ func TestDaemonClientEventsAndDeleteApp(t *testing.T) {
 
 	if _, err := client.Status(ctx, cfg.App.OrgID, cfg.App.Name); err == nil {
 		t.Fatal("expected status after delete to fail")
+	}
+}
+
+func TestDaemonClientCanaryLogsOrgQuotaAndPrune(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/canary":
+			var req struct {
+				OrgID      string `json:"org_id"`
+				AppName    string `json:"app_name"`
+				StandbyPct int    `json:"standby_pct"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode canary request: %v", err)
+			}
+			if req.OrgID != "org-alpha" || req.AppName != "micro-crm" || req.StandbyPct != 25 {
+				t.Fatalf("unexpected canary request: %+v", req)
+			}
+			_ = json.NewEncoder(w).Encode(daemon.RouteEntry{
+				OrgID:            req.OrgID,
+				AppName:          req.AppName,
+				ActiveColor:      daemon.ColorBlue,
+				ActiveReleaseID:  "v1.1.0",
+				StandbyReleaseID: "v1.0.0",
+				CanaryWeight:     req.StandbyPct,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/logs":
+			q := r.URL.Query()
+			if q.Get("org_id") != "org-alpha" || q.Get("app_name") != "micro-crm" || q.Get("release_id") != "v1.0.0" || q.Get("tail") != "50" {
+				t.Fatalf("unexpected logs query: %s", r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"logs": "line1\nline2"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/org-quota":
+			var req struct {
+				OrgID         string  `json:"org_id"`
+				MaxMonthlyUSD float64 `json:"max_monthly_usd"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode org-quota request: %v", err)
+			}
+			if req.OrgID != "org-alpha" || req.MaxMonthlyUSD != 25.5 {
+				t.Fatalf("unexpected org-quota request: %+v", req)
+			}
+			_ = json.NewEncoder(w).Encode(daemon.OrgSpendSummary{
+				OrgID:         req.OrgID,
+				MaxMonthlyUSD: req.MaxMonthlyUSD,
+				TotalSpendUSD: 3.25,
+				AppCount:      2,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/org-quota":
+			if r.URL.Query().Get("org_id") != "org-alpha" {
+				t.Fatalf("unexpected org-quota query: %s", r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(daemon.OrgSpendSummary{
+				OrgID:         "org-alpha",
+				MaxMonthlyUSD: 25.5,
+				TotalSpendUSD: 3.25,
+				AppCount:      2,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/prune":
+			var req struct {
+				OrgID    string `json:"org_id"`
+				AppName  string `json:"app_name"`
+				KeepLast int    `json:"keep_last"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode prune request: %v", err)
+			}
+			if req.OrgID != "org-alpha" || req.AppName != "micro-crm" || req.KeepLast != 3 {
+				t.Fatalf("unexpected prune request: %+v", req)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]int{"pruned": 2})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	ctx := context.Background()
+
+	route, err := client.SetCanaryWeight(ctx, "org-alpha", "micro-crm", 25)
+	if err != nil {
+		t.Fatalf("SetCanaryWeight failed: %v", err)
+	}
+	if route.CanaryWeight != 25 || route.ActiveReleaseID != "v1.1.0" {
+		t.Fatalf("unexpected canary route: %+v", route)
+	}
+
+	logs, err := client.Logs(ctx, "org-alpha", "micro-crm", "v1.0.0", 50)
+	if err != nil {
+		t.Fatalf("Logs failed: %v", err)
+	}
+	if logs != "line1\nline2" {
+		t.Fatalf("unexpected logs: %q", logs)
+	}
+
+	setSummary, err := client.SetOrgQuota(ctx, "org-alpha", 25.5)
+	if err != nil {
+		t.Fatalf("SetOrgQuota failed: %v", err)
+	}
+	if setSummary.MaxMonthlyUSD != 25.5 || setSummary.AppCount != 2 {
+		t.Fatalf("unexpected SetOrgQuota summary: %+v", setSummary)
+	}
+
+	gotSummary, err := client.OrgSummary(ctx, "org-alpha")
+	if err != nil {
+		t.Fatalf("OrgSummary failed: %v", err)
+	}
+	if gotSummary.MaxMonthlyUSD != 25.5 || gotSummary.TotalSpendUSD != 3.25 {
+		t.Fatalf("unexpected OrgSummary: %+v", gotSummary)
+	}
+
+	pruned, err := client.PruneSnapshots(ctx, "org-alpha", "micro-crm", 3)
+	if err != nil {
+		t.Fatalf("PruneSnapshots failed: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("expected 2 pruned snapshots, got %d", pruned)
 	}
 }

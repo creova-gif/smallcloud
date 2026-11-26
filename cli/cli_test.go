@@ -619,3 +619,235 @@ func TestCLILogsAndCanary(t *testing.T) {
 		t.Fatal("expected canary with invalid pct to fail")
 	}
 }
+
+func TestCLIInitTemplates(t *testing.T) {
+	nodeDir := filepath.Join(t.TempDir(), "node-app")
+	var nodeOut bytes.Buffer
+	if err := Run([]string{"init", "--template", "node", nodeDir}, t.TempDir(), &nodeOut); err != nil {
+		t.Fatalf("init --template node failed: %v", err)
+	}
+	nodeToml, err := os.ReadFile(filepath.Join(nodeDir, "smallcloud.toml"))
+	if err != nil {
+		t.Fatalf("read node smallcloud.toml: %v", err)
+	}
+	if !strings.Contains(string(nodeToml), "port = 8080") {
+		t.Fatalf("expected port = 8080 for node template, got:\n%s", string(nodeToml))
+	}
+
+	goDir := filepath.Join(t.TempDir(), "go-app")
+	var goOut bytes.Buffer
+	if err := Run([]string{"init", "--template=go", goDir}, t.TempDir(), &goOut); err != nil {
+		t.Fatalf("init --template=go failed: %v", err)
+	}
+	goToml, err := os.ReadFile(filepath.Join(goDir, "smallcloud.toml"))
+	if err != nil {
+		t.Fatalf("read go smallcloud.toml: %v", err)
+	}
+	if !strings.Contains(string(goToml), "port = 8080") {
+		t.Fatalf("expected port = 8080 for go template, got:\n%s", string(goToml))
+	}
+
+	fastapiDir := filepath.Join(t.TempDir(), "py-app")
+	var pyOut bytes.Buffer
+	if err := Run([]string{"init", "--template", "fastapi", fastapiDir}, t.TempDir(), &pyOut); err != nil {
+		t.Fatalf("init --template fastapi failed: %v", err)
+	}
+	pyToml, err := os.ReadFile(filepath.Join(fastapiDir, "smallcloud.toml"))
+	if err != nil {
+		t.Fatalf("read fastapi smallcloud.toml: %v", err)
+	}
+	if !strings.Contains(string(pyToml), "port = 8000") {
+		t.Fatalf("expected port = 8000 for fastapi template, got:\n%s", string(pyToml))
+	}
+
+	if err := Run([]string{"init", "--template", "rust", filepath.Join(t.TempDir(), "bad-app")}, t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected unsupported template to fail")
+	}
+}
+
+func TestCLIOrgQuotaAndPruneLocal(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, stateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("local deploy failed: %v", err)
+	}
+
+	var setOut bytes.Buffer
+	if err := Run([]string{"org-quota", "org-indie-default", "50.0"}, stateDir, &setOut); err != nil {
+		t.Fatalf("local org-quota set failed: %v", err)
+	}
+	var setSummary daemon.OrgSpendSummary
+	if err := json.Unmarshal(setOut.Bytes(), &setSummary); err != nil {
+		t.Fatalf("unmarshal org-quota set: %v", err)
+	}
+	if setSummary.OrgID != "org-indie-default" || setSummary.MaxMonthlyUSD != 50.0 {
+		t.Fatalf("unexpected org-quota set summary: %+v", setSummary)
+	}
+
+	var getOut bytes.Buffer
+	if err := Run([]string{"org-quota", "org-indie-default"}, stateDir, &getOut); err != nil {
+		t.Fatalf("local org-quota get failed: %v", err)
+	}
+	var getSummary daemon.OrgSpendSummary
+	if err := json.Unmarshal(getOut.Bytes(), &getSummary); err != nil {
+		t.Fatalf("unmarshal org-quota get: %v", err)
+	}
+	if getSummary.MaxMonthlyUSD != 50.0 {
+		t.Fatalf("expected max_monthly_usd 50.0, got %+v", getSummary)
+	}
+
+	if err := Run([]string{"org-quota"}, stateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected org-quota with missing args to fail")
+	}
+	if err := Run([]string{"org-quota", "org-indie-default", "not-a-float"}, stateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected org-quota with invalid max_monthly_usd to fail")
+	}
+
+	var pruneOut bytes.Buffer
+	if err := Run([]string{"prune", templateDir, "2"}, stateDir, &pruneOut); err != nil {
+		t.Fatalf("local prune failed: %v", err)
+	}
+	var pruneRes struct {
+		OrgID    string `json:"org_id"`
+		AppName  string `json:"app_name"`
+		KeepLast int    `json:"keep_last"`
+		Pruned   int    `json:"pruned"`
+	}
+	if err := json.Unmarshal(pruneOut.Bytes(), &pruneRes); err != nil {
+		t.Fatalf("unmarshal prune output: %v", err)
+	}
+	if pruneRes.OrgID != "org-indie-default" || pruneRes.AppName != "fastapi-starter" || pruneRes.KeepLast != 2 || pruneRes.Pruned != 0 {
+		t.Fatalf("unexpected local prune output: %+v", pruneRes)
+	}
+}
+
+func TestCLIRemoteCanaryLogsOrgQuotaAndPrune(t *testing.T) {
+	const token = "cli-remote-extra-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/status":
+			_ = json.NewEncoder(w).Encode(daemon.AppStatus{
+				OrgID:   "org-indie-default",
+				AppName: "fastapi-starter",
+				Route: daemon.RouteEntry{
+					OrgID:           "org-indie-default",
+					AppName:         "fastapi-starter",
+					ActiveReleaseID: "v2.0.0",
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/logs":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"logs": "remote log for " + r.URL.Query().Get("release_id"),
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/canary":
+			var req struct {
+				OrgID      string `json:"org_id"`
+				AppName    string `json:"app_name"`
+				StandbyPct int    `json:"standby_pct"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(daemon.RouteEntry{
+				OrgID:            req.OrgID,
+				AppName:          req.AppName,
+				ActiveReleaseID:  "v2.0.0",
+				StandbyReleaseID: "v1.0.0",
+				CanaryWeight:     req.StandbyPct,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/org-quota":
+			var req struct {
+				OrgID         string  `json:"org_id"`
+				MaxMonthlyUSD float64 `json:"max_monthly_usd"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(daemon.OrgSpendSummary{
+				OrgID:         req.OrgID,
+				MaxMonthlyUSD: req.MaxMonthlyUSD,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/org-quota":
+			_ = json.NewEncoder(w).Encode(daemon.OrgSpendSummary{
+				OrgID:         r.URL.Query().Get("org_id"),
+				MaxMonthlyUSD: 42.5,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/prune":
+			var req struct {
+				KeepLast int `json:"keep_last"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(map[string]int{"pruned": req.KeepLast})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+	stateDir := t.TempDir()
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+
+	var canaryOut bytes.Buffer
+	if err := Run([]string{"canary", templateDir, "30"}, stateDir, &canaryOut); err != nil {
+		t.Fatalf("remote canary failed: %v", err)
+	}
+	var route daemon.RouteEntry
+	if err := json.Unmarshal(canaryOut.Bytes(), &route); err != nil {
+		t.Fatalf("unmarshal remote canary: %v", err)
+	}
+	if route.CanaryWeight != 30 {
+		t.Fatalf("expected standby weight 30, got %+v", route)
+	}
+
+	var logsOut bytes.Buffer
+	if err := Run([]string{"logs", templateDir}, stateDir, &logsOut); err != nil {
+		t.Fatalf("remote logs failed: %v", err)
+	}
+	var logsRes struct {
+		ReleaseID string `json:"release_id"`
+		Logs      string `json:"logs"`
+	}
+	if err := json.Unmarshal(logsOut.Bytes(), &logsRes); err != nil {
+		t.Fatalf("unmarshal remote logs: %v", err)
+	}
+	if logsRes.ReleaseID != "v2.0.0" || logsRes.Logs != "remote log for v2.0.0" {
+		t.Fatalf("unexpected remote logs: %+v", logsRes)
+	}
+
+	var quotaSetOut bytes.Buffer
+	if err := Run([]string{"org-quota", "org-indie-default", "42.5"}, stateDir, &quotaSetOut); err != nil {
+		t.Fatalf("remote org-quota set failed: %v", err)
+	}
+	var quotaSet daemon.OrgSpendSummary
+	if err := json.Unmarshal(quotaSetOut.Bytes(), &quotaSet); err != nil {
+		t.Fatalf("unmarshal remote org-quota set: %v", err)
+	}
+	if quotaSet.MaxMonthlyUSD != 42.5 {
+		t.Fatalf("expected max_monthly_usd 42.5, got %+v", quotaSet)
+	}
+
+	var quotaGetOut bytes.Buffer
+	if err := Run([]string{"org-quota", "org-indie-default"}, stateDir, &quotaGetOut); err != nil {
+		t.Fatalf("remote org-quota get failed: %v", err)
+	}
+
+	var pruneOut bytes.Buffer
+	if err := Run([]string{"prune", templateDir}, stateDir, &pruneOut); err != nil {
+		t.Fatalf("remote prune failed: %v", err)
+	}
+	var pruneRes struct {
+		KeepLast int `json:"keep_last"`
+		Pruned   int `json:"pruned"`
+	}
+	if err := json.Unmarshal(pruneOut.Bytes(), &pruneRes); err != nil {
+		t.Fatalf("unmarshal remote prune: %v", err)
+	}
+	if pruneRes.KeepLast != 5 || pruneRes.Pruned != 5 {
+		t.Fatalf("unexpected remote prune output: %+v", pruneRes)
+	}
+}

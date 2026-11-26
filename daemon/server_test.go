@@ -2,12 +2,17 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -658,5 +663,443 @@ func TestDeleteAppEndpoint(t *testing.T) {
 	h.ServeHTTP(delAgainRec, delAgainReq)
 	if delAgainRec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 on second delete, got %d: %s", delAgainRec.Code, delAgainRec.Body.String())
+	}
+}
+
+type recordingRuntime struct {
+	mu       sync.Mutex
+	specs    []ContainerSpec
+	logCalls []string
+	logOut   string
+}
+
+func (r *recordingRuntime) Start(_ context.Context, spec ContainerSpec) (string, error) {
+	r.mu.Lock()
+	r.specs = append(r.specs, spec)
+	r.mu.Unlock()
+	return fmt.Sprintf("127.0.0.1:%d", spec.Port), nil
+}
+
+func (r *recordingRuntime) Stop(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (r *recordingRuntime) Logs(_ context.Context, orgID, appName, releaseID string, tail int) (string, error) {
+	r.mu.Lock()
+	r.logCalls = append(r.logCalls, fmt.Sprintf("%s/%s/%s:%d", orgID, appName, releaseID, tail))
+	out := r.logOut
+	r.mu.Unlock()
+	return out, nil
+}
+
+func TestDeployPassesEnvAndHealthcheckToContainerSpec(t *testing.T) {
+	d := newTestServerDaemon(t)
+	rt := &recordingRuntime{}
+	d.SetRuntime(rt)
+
+	cfg := &config.Config{
+		App: config.AppConfig{
+			Name:        "api",
+			OrgID:       "acme",
+			Domain:      "api.smallcloud.dev",
+			Port:        8080,
+			Healthcheck: "/readyz",
+			Runtime:     "dockerfile",
+		},
+		Resources: config.ResourcesConfig{
+			CPUMillicores: 500,
+			MemoryMB:      256,
+		},
+		Budget: config.BudgetConfig{
+			MaxMonthlyUSD: 20.0,
+			AlertAtPct:    80.0,
+			HardStop:      true,
+		},
+		Storage: config.StorageConfig{
+			SQLitePath: "/data/api.db",
+			SyncMs:     1000,
+		},
+		Env: map[string]string{
+			"LOG_LEVEL": "debug",
+			"APP_ENV":   "staging",
+		},
+	}
+
+	if _, err := d.Deploy(cfg, "rel-env-1"); err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.specs) != 1 {
+		t.Fatalf("expected 1 runtime start call, got %d", len(rt.specs))
+	}
+	spec := rt.specs[0]
+	if spec.Healthcheck != "/readyz" {
+		t.Fatalf("expected healthcheck /readyz, got %q", spec.Healthcheck)
+	}
+	if spec.Env["LOG_LEVEL"] != "debug" || spec.Env["APP_ENV"] != "staging" {
+		t.Fatalf("expected env map to be forwarded, got %+v", spec.Env)
+	}
+}
+
+func TestWebhookNotifierOnBudgetAlert(t *testing.T) {
+	d := newTestServerDaemon(t)
+
+	received := make(chan WebhookPayload, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var payload WebhookPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		select {
+		case received <- payload:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d.SetWebhookNotifier(&WebhookNotifier{
+		URL:    srv.URL,
+		Secret: "hook-secret",
+		Client: srv.Client(),
+	})
+
+	if err := d.budget.RegisterApp("acme", "web", 100.0, 80.0); err != nil {
+		t.Fatalf("register app failed: %v", err)
+	}
+	if _, err := d.RecordSpend("acme", "web", 85.0); err != nil {
+		t.Fatalf("record spend failed: %v", err)
+	}
+
+	select {
+	case payload := <-received:
+		if payload.Event != "budget_alert" || payload.OrgID != "acme" || payload.AppName != "web" {
+			t.Fatalf("unexpected webhook payload: %+v", payload)
+		}
+		if payload.SpendUSD != 85.0 || payload.MaxMonthlyUSD != 100.0 {
+			t.Fatalf("unexpected spend/max in payload: %+v", payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for budget alert webhook")
+	}
+
+	events := d.Audit().List("acme", "web", 0)
+	found := false
+	for _, ev := range events {
+		if ev.Type == "budget_alert" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected budget_alert audit event, got %+v", events)
+	}
+}
+
+func TestCanaryEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodPost, "/v1/canary", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","canary_weight":20}`))
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodPost, "/v1/canary", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","canary_weight":20}`))
+	missingReq.Header.Set("Authorization", "Bearer secret-token")
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when route missing, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	cfg := &config.Config{
+		App: config.AppConfig{
+			Name:        "web",
+			OrgID:       "acme",
+			Domain:      "web.smallcloud.dev",
+			Port:        8000,
+			Healthcheck: "/healthz",
+			Runtime:     "dockerfile",
+		},
+		Resources: config.ResourcesConfig{
+			CPUMillicores: 250,
+			MemoryMB:      128,
+		},
+		Budget: config.BudgetConfig{
+			MaxMonthlyUSD: 10.0,
+			AlertAtPct:    80.0,
+			HardStop:      true,
+		},
+		Storage: config.StorageConfig{
+			SQLitePath: "/data/web.db",
+			SyncMs:     1000,
+		},
+	}
+	if _, err := d.Deploy(cfg, "v1"); err != nil {
+		t.Fatalf("deploy v1 failed: %v", err)
+	}
+
+	noStandbyReq := httptest.NewRequest(http.MethodPost, "/v1/canary", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","canary_weight":25}`))
+	noStandbyReq.Header.Set("Authorization", "Bearer secret-token")
+	noStandbyRec := httptest.NewRecorder()
+	h.ServeHTTP(noStandbyRec, noStandbyReq)
+	if noStandbyRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when no standby upstream, got %d: %s", noStandbyRec.Code, noStandbyRec.Body.String())
+	}
+
+	if _, err := d.Deploy(cfg, "v2"); err != nil {
+		t.Fatalf("deploy v2 failed: %v", err)
+	}
+
+	okReq := httptest.NewRequest(http.MethodPost, "/v1/canary", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","canary_weight":25}`))
+	okReq.Header.Set("Authorization", "Bearer secret-token")
+	okRec := httptest.NewRecorder()
+	h.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 setting canary weight, got %d: %s", okRec.Code, okRec.Body.String())
+	}
+
+	var route RouteEntry
+	if err := json.Unmarshal(okRec.Body.Bytes(), &route); err != nil {
+		t.Fatalf("unmarshal canary route: %v", err)
+	}
+	if route.CanaryWeight != 25 || route.ActiveReleaseID != "v2" || route.StandbyReleaseID != "v1" {
+		t.Fatalf("unexpected canary route: %+v", route)
+	}
+
+	events := d.Audit().List("acme", "web", 1)
+	if len(events) != 1 || events[0].Type != "canary" {
+		t.Fatalf("expected canary audit event, got %+v", events)
+	}
+}
+
+func TestLogsEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	rt := &recordingRuntime{logOut: "line1\nline2\n"}
+	d.SetRuntime(rt)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/v1/logs?org_id=acme&app=web", nil)
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodGet, "/v1/logs?org_id=acme&app=web", nil)
+	missingReq.Header.Set("Authorization", "Bearer secret-token")
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when route missing, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	cfg := &config.Config{
+		App: config.AppConfig{
+			Name:        "web",
+			OrgID:       "acme",
+			Domain:      "web.smallcloud.dev",
+			Port:        8000,
+			Healthcheck: "/healthz",
+			Runtime:     "dockerfile",
+		},
+		Resources: config.ResourcesConfig{
+			CPUMillicores: 250,
+			MemoryMB:      128,
+		},
+		Budget: config.BudgetConfig{
+			MaxMonthlyUSD: 10.0,
+			AlertAtPct:    80.0,
+			HardStop:      true,
+		},
+		Storage: config.StorageConfig{
+			SQLitePath: "/data/web.db",
+			SyncMs:     1000,
+		},
+	}
+	if _, err := d.Deploy(cfg, "rel-active"); err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	badTailReq := httptest.NewRequest(http.MethodGet, "/v1/logs?org_id=acme&app=web&tail=-5", nil)
+	badTailReq.Header.Set("Authorization", "Bearer secret-token")
+	badTailRec := httptest.NewRecorder()
+	h.ServeHTTP(badTailRec, badTailReq)
+	if badTailRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for negative tail, got %d", badTailRec.Code)
+	}
+
+	defaultReq := httptest.NewRequest(http.MethodGet, "/v1/logs?org_id=acme&app=web&tail=50", nil)
+	defaultReq.Header.Set("Authorization", "Bearer secret-token")
+	defaultRec := httptest.NewRecorder()
+	h.ServeHTTP(defaultRec, defaultReq)
+	if defaultRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on logs, got %d: %s", defaultRec.Code, defaultRec.Body.String())
+	}
+	var resp struct {
+		OrgID     string `json:"org_id"`
+		AppName   string `json:"app_name"`
+		ReleaseID string `json:"release_id"`
+		Logs      string `json:"logs"`
+	}
+	if err := json.Unmarshal(defaultRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal logs response: %v", err)
+	}
+	if resp.OrgID != "acme" || resp.AppName != "web" || resp.ReleaseID != "rel-active" || resp.Logs != "line1\nline2\n" {
+		t.Fatalf("unexpected logs response: %+v", resp)
+	}
+
+	explicitReq := httptest.NewRequest(http.MethodGet, "/v1/logs?org_id=acme&app=web&release_id=rel-prev&tail=10", nil)
+	explicitReq.Header.Set("Authorization", "Bearer secret-token")
+	explicitRec := httptest.NewRecorder()
+	h.ServeHTTP(explicitRec, explicitReq)
+	if explicitRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on explicit release logs, got %d: %s", explicitRec.Code, explicitRec.Body.String())
+	}
+
+	rt.mu.Lock()
+	calls := append([]string(nil), rt.logCalls...)
+	rt.mu.Unlock()
+	if len(calls) != 2 || calls[0] != "acme/web/rel-active:50" || calls[1] != "acme/web/rel-prev:10" {
+		t.Fatalf("unexpected runtime log calls: %+v", calls)
+	}
+}
+
+func TestOrgQuotaEndpoints(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/v1/org-quota?org_id=acme", nil)
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	if err := d.budget.RegisterApp("acme", "api", 50.0, 80.0); err != nil {
+		t.Fatalf("register api failed: %v", err)
+	}
+	if err := d.budget.RegisterApp("acme", "web", 50.0, 80.0); err != nil {
+		t.Fatalf("register web failed: %v", err)
+	}
+	if _, err := d.RecordSpend("acme", "api", 15.0); err != nil {
+		t.Fatalf("record spend api failed: %v", err)
+	}
+	if _, err := d.RecordSpend("acme", "web", 10.0); err != nil {
+		t.Fatalf("record spend web failed: %v", err)
+	}
+
+	setReq := httptest.NewRequest(http.MethodPost, "/v1/org-quota", bytes.NewBufferString(`{"org_id":"acme","max_monthly_usd":20.0}`))
+	setReq.Header.Set("Authorization", "Bearer secret-token")
+	setRec := httptest.NewRecorder()
+	h.ServeHTTP(setRec, setReq)
+	if setRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 setting org quota, got %d: %s", setRec.Code, setRec.Body.String())
+	}
+
+	var setSummary OrgSpendSummary
+	if err := json.Unmarshal(setRec.Body.Bytes(), &setSummary); err != nil {
+		t.Fatalf("unmarshal set org quota: %v", err)
+	}
+	if setSummary.OrgID != "acme" || setSummary.MaxMonthlyUSD != 20.0 || setSummary.TotalSpendUSD != 25.0 || setSummary.AppCount != 2 || !setSummary.Exceeded {
+		t.Fatalf("unexpected set org quota summary: %+v", setSummary)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/org-quota?org_id=acme", nil)
+	getReq.Header.Set("Authorization", "Bearer secret-token")
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 getting org quota, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+	var getSummary OrgSpendSummary
+	if err := json.Unmarshal(getRec.Body.Bytes(), &getSummary); err != nil {
+		t.Fatalf("unmarshal get org quota: %v", err)
+	}
+	if getSummary != setSummary {
+		t.Fatalf("GET org-quota mismatch: got %+v, want %+v", getSummary, setSummary)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := d.SaveState(statePath); err != nil {
+		t.Fatalf("save state failed: %v", err)
+	}
+	d2 := newTestServerDaemon(t)
+	if err := d2.LoadState(statePath); err != nil {
+		t.Fatalf("load state failed: %v", err)
+	}
+	restored, err := d2.OrgSummary("acme")
+	if err != nil {
+		t.Fatalf("restored org summary failed: %v", err)
+	}
+	if restored.MaxMonthlyUSD != 20.0 || !restored.Exceeded {
+		t.Fatalf("expected restored org quota 20.0 exceeded=true, got %+v", restored)
+	}
+}
+
+func TestPruneEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodPost, "/v1/prune", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","keep_last":1}`))
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	srcFile := filepath.Join(t.TempDir(), "web.db")
+	for i := 1; i <= 3; i++ {
+		if err := os.WriteFile(srcFile, []byte(fmt.Sprintf("sqlite-data-%d", i)), 0o600); err != nil {
+			t.Fatalf("write sqlite fixture: %v", err)
+		}
+		if _, err := d.Storage().SyncWAL("acme", "web", srcFile); err != nil {
+			t.Fatalf("sync wal %d: %v", i, err)
+		}
+	}
+
+	badReq := httptest.NewRequest(http.MethodPost, "/v1/prune", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","keep_last":0}`))
+	badReq.Header.Set("Authorization", "Bearer secret-token")
+	badRec := httptest.NewRecorder()
+	h.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for keep_last=0, got %d: %s", badRec.Code, badRec.Body.String())
+	}
+
+	pruneReq := httptest.NewRequest(http.MethodPost, "/v1/prune", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","keep_last":1}`))
+	pruneReq.Header.Set("Authorization", "Bearer secret-token")
+	pruneRec := httptest.NewRecorder()
+	h.ServeHTTP(pruneRec, pruneReq)
+	if pruneRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on prune, got %d: %s", pruneRec.Code, pruneRec.Body.String())
+	}
+
+	var pruneResp struct {
+		Pruned int `json:"pruned"`
+	}
+	if err := json.Unmarshal(pruneRec.Body.Bytes(), &pruneResp); err != nil {
+		t.Fatalf("unmarshal prune response: %v", err)
+	}
+	if pruneResp.Pruned != 2 {
+		t.Fatalf("expected pruned=2, got %d", pruneResp.Pruned)
+	}
+
+	remaining, err := d.Storage().ListSnapshots("acme", "web")
+	if err != nil {
+		t.Fatalf("list snapshots failed: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].Generation != 3 {
+		t.Fatalf("expected only generation 3 remaining, got %+v", remaining)
 	}
 }

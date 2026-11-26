@@ -245,3 +245,83 @@ func (c *DaemonClient) DeleteApp(ctx context.Context, orgID, appName string) err
 	q.Set("app", appName)
 	return c.doJSON(ctx, http.MethodDelete, "/v1/apps?"+q.Encode(), nil, nil)
 }
+
+func (c *DaemonClient) SetCanaryWeight(ctx context.Context, orgID, appName string, standbyPct int) (daemon.RouteEntry, error) {
+	req := struct {
+		OrgID      string `json:"org_id"`
+		AppName    string `json:"app_name"`
+		StandbyPct int    `json:"standby_pct"`
+	}{
+		OrgID:      orgID,
+		AppName:    appName,
+		StandbyPct: standbyPct,
+	}
+	var out daemon.RouteEntry
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/canary", req, &out); err != nil {
+		return daemon.RouteEntry{}, err
+	}
+	return out, nil
+}
+
+func (c *DaemonClient) Logs(ctx context.Context, orgID, appName, releaseID string, tail int) (string, error) {
+	q := url.Values{}
+	q.Set("org_id", orgID)
+	q.Set("app_name", appName)
+	if releaseID != "" {
+		q.Set("release_id", releaseID)
+	}
+	if tail > 0 {
+		q.Set("tail", strconv.Itoa(tail))
+	}
+	var out struct {
+		Logs string `json:"logs"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/logs?"+q.Encode(), nil, &out); err != nil {
+		return "", err
+	}
+	return out.Logs, nil
+}
+
+func (c *DaemonClient) SetOrgQuota(ctx context.Context, orgID string, maxMonthlyUSD float64) (daemon.OrgSpendSummary, error) {
+	req := struct {
+		OrgID         string  `json:"org_id"`
+		MaxMonthlyUSD float64 `json:"max_monthly_usd"`
+	}{
+		OrgID:         orgID,
+		MaxMonthlyUSD: maxMonthlyUSD,
+	}
+	var out daemon.OrgSpendSummary
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/org-quota", req, &out); err != nil {
+		return daemon.OrgSpendSummary{}, err
+	}
+	return out, nil
+}
+
+func (c *DaemonClient) OrgSummary(ctx context.Context, orgID string) (daemon.OrgSpendSummary, error) {
+	q := url.Values{}
+	q.Set("org_id", orgID)
+	var out daemon.OrgSpendSummary
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/org-quota?"+q.Encode(), nil, &out); err != nil {
+		return daemon.OrgSpendSummary{}, err
+	}
+	return out, nil
+}
+
+func (c *DaemonClient) PruneSnapshots(ctx context.Context, orgID, appName string, keepLast int) (int, error) {
+	req := struct {
+		OrgID    string `json:"org_id"`
+		AppName  string `json:"app_name"`
+		KeepLast int    `json:"keep_last"`
+	}{
+		OrgID:    orgID,
+		AppName:  appName,
+		KeepLast: keepLast,
+	}
+	var out struct {
+		Pruned int `json:"pruned"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/prune", req, &out); err != nil {
+		return 0, err
+	}
+	return out.Pruned, nil
+}

@@ -39,6 +39,6 @@
 ## Wave 7: Distributed Edge, Zero-Trust Mesh & Developer Platform
 - [ ] Multi-Region SQLite Read Replicas
 - [ ] WireGuard Mesh Control-Plane Tunneling
-- [ ] GitHub Webhook Git-Push Deployments
-- [ ] Interactive App Scaffolding & Plugin Templates
-- [ ] Automated Chaos & Canary Auto-Rollback
+- [x] GitHub Webhook Git-Push Deployments
+- [x] Interactive App Scaffolding & Plugin Templates
+- [x] Automated Chaos & Canary Auto-Rollback

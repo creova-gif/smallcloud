@@ -34,6 +34,7 @@ type AppStatus struct {
 type DaemonState struct {
 	Seq         int                          `json:"seq"`
 	Budgets     map[string]*AppBudgetState   `json:"budgets"`
+	OrgQuotas   map[string]float64           `json:"org_quotas,omitempty"`
 	Routes      map[string]*RouteEntry       `json:"routes"`
 	Generations map[string]int               `json:"generations"`
 	Snapshots   map[string]*SnapshotMetadata `json:"snapshots"`
@@ -63,6 +64,7 @@ type Daemon struct {
 	storage   *StorageManager
 	router    *CaddyRouter
 	runtime   ContainerRuntime
+	notifier  *WebhookNotifier
 	audit     *AuditLog
 	seq       int
 	appMeta   map[string]AppMeta
@@ -101,6 +103,34 @@ func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
 			})
 		},
 	)
+	d.budget.SetAlertCallback(func(orgID, appName string, state AppBudgetState) {
+		d.audit.Record(AuditEvent{
+			Type:    "budget_alert",
+			OrgID:   orgID,
+			AppName: appName,
+			Detail:  fmt.Sprintf("spend=%.2f max=%.2f alert_at_pct=%.1f", state.CurrentUSD, state.MaxMonthlyUSD, state.AlertAtPct),
+		})
+		d.metaMu.RLock()
+		notifier := d.notifier
+		d.metaMu.RUnlock()
+		if notifier != nil && notifier.URL != "" {
+			payload := WebhookPayload{
+				Event:         "budget_alert",
+				OrgID:         orgID,
+				AppName:       appName,
+				SpendUSD:      state.CurrentUSD,
+				MaxMonthlyUSD: state.MaxMonthlyUSD,
+				AlertAtPct:    state.AlertAtPct,
+				Halted:        state.Halted,
+				Timestamp:     time.Now().UTC(),
+			}
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = notifier.Notify(ctx, payload)
+			}()
+		}
+	})
 	return d
 }
 
@@ -123,6 +153,12 @@ func (d *Daemon) Runtime() ContainerRuntime {
 	d.metaMu.RLock()
 	defer d.metaMu.RUnlock()
 	return d.runtime
+}
+
+func (d *Daemon) SetWebhookNotifier(n *WebhookNotifier) {
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
+	d.notifier = n
 }
 
 func (d *Daemon) resolveHostSQLitePath(orgID, appName, cfgPath string) string {
@@ -244,6 +280,8 @@ func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult
 		CPUMillicores: cfg.Resources.CPUMillicores,
 		MemoryMB:      cfg.Resources.MemoryMB,
 		SQLitePath:    cfg.Storage.SQLitePath,
+		Healthcheck:   cfg.App.Healthcheck,
+		Env:           cfg.Env,
 	})
 	if err != nil {
 		return nil, err
@@ -336,6 +374,70 @@ func (d *Daemon) SetMaxBudget(orgID, appName string, maxMonthlyUSD float64) (App
 		Detail:  fmt.Sprintf("max_monthly_usd=%.2f", maxMonthlyUSD),
 	})
 	return st, nil
+}
+
+func (d *Daemon) SetCanaryWeight(orgID, appName string, standbyPct int) (RouteEntry, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return RouteEntry{}, err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	route, err := d.router.SetCanaryWeight(orgID, appName, standbyPct)
+	if err != nil {
+		return RouteEntry{}, err
+	}
+	d.audit.Record(AuditEvent{
+		Type:      "canary",
+		OrgID:     orgID,
+		AppName:   appName,
+		ReleaseID: route.StandbyReleaseID,
+		Detail:    fmt.Sprintf("canary_weight=%d", route.CanaryWeight),
+	})
+	return route, nil
+}
+
+func (d *Daemon) AppLogs(ctx context.Context, orgID, appName, releaseID string, tail int) (string, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return "", err
+	}
+	if releaseID == "" {
+		route, ok := d.router.GetRoute(orgID, appName)
+		if !ok || route.ActiveReleaseID == "" {
+			return "", fmt.Errorf("%w for %s/%s", ErrNoRouteFound, orgID, appName)
+		}
+		releaseID = route.ActiveReleaseID
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.Runtime().Logs(ctx, orgID, appName, releaseID, tail)
+}
+
+func (d *Daemon) SetOrgQuota(orgID string, maxMonthlyUSD float64) (OrgSpendSummary, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.budget.SetOrgQuota(orgID, maxMonthlyUSD); err != nil {
+		return OrgSpendSummary{}, err
+	}
+	d.audit.Record(AuditEvent{
+		Type:   "org_quota_updated",
+		OrgID:  orgID,
+		Detail: fmt.Sprintf("max_monthly_usd=%.2f", maxMonthlyUSD),
+	})
+	return d.budget.OrgSummary(orgID), nil
+}
+
+func (d *Daemon) OrgSummary(orgID string) (OrgSpendSummary, error) {
+	if !config.IsValidSlug(orgID) {
+		return OrgSpendSummary{}, errors.New("org_id must be a valid lowercase alphanumeric slug")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.budget.OrgSummary(orgID), nil
 }
 
 func (d *Daemon) RolloverAll(now time.Time) int {
@@ -540,6 +642,12 @@ func (d *Daemon) LoadState(path string) error {
 
 	d.seq = st.Seq
 	d.budget.RestoreStates(st.Budgets)
+	d.budget.mu.Lock()
+	d.budget.orgQuotas = make(map[string]float64, len(st.OrgQuotas))
+	for k, v := range st.OrgQuotas {
+		d.budget.orgQuotas[k] = v
+	}
+	d.budget.mu.Unlock()
 	d.router.RestoreRoutes(st.Routes)
 	d.storage.RestoreGenerations(st.Generations)
 	d.audit.Restore(st.AuditEvents)
@@ -581,9 +689,17 @@ func (d *Daemon) SaveState(path string) error {
 	}
 	d.metaMu.RUnlock()
 
+	d.budget.mu.RLock()
+	orgQuotasCopy := make(map[string]float64, len(d.budget.orgQuotas))
+	for k, v := range d.budget.orgQuotas {
+		orgQuotasCopy[k] = v
+	}
+	d.budget.mu.RUnlock()
+
 	st := DaemonState{
 		Seq:         d.seq,
 		Budgets:     d.budget.SnapshotStates(),
+		OrgQuotas:   orgQuotasCopy,
 		Routes:      d.router.SnapshotRoutes(),
 		Generations: d.storage.SnapshotGenerations(),
 		Snapshots:   snapCopy,
