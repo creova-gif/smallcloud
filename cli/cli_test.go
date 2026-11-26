@@ -496,6 +496,64 @@ func TestCLIServeBackgroundRolloverAndShutdown(t *testing.T) {
 	}
 }
 
+func TestCLIServeWorkerTTLValidationAndReaper(t *testing.T) {
+	t.Setenv("SMALLCLOUD_WORKER_TTL", "0s")
+	if err := ServeWithContext(context.Background(), "127.0.0.1:0", t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for non-positive SMALLCLOUD_WORKER_TTL")
+	}
+
+	t.Setenv("SMALLCLOUD_WORKER_TTL", "-5s")
+	if err := ServeWithContext(context.Background(), "127.0.0.1:0", t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for negative SMALLCLOUD_WORKER_TTL")
+	}
+
+	t.Setenv("SMALLCLOUD_WORKER_TTL", "not-a-duration")
+	if err := ServeWithContext(context.Background(), "127.0.0.1:0", t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for invalid SMALLCLOUD_WORKER_TTL")
+	}
+
+	stateDir := t.TempDir()
+	statePath := filepath.Join(stateDir, "state.json")
+	seed := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	if _, err := seed.WorkerPool().RegisterNode(daemon.WorkerNode{
+		ID:      "node-stale",
+		Address: "10.0.0.1:7420",
+		MaxApps: 4,
+	}); err != nil {
+		t.Fatalf("register stale node: %v", err)
+	}
+	time.Sleep(120 * time.Millisecond)
+	if _, err := seed.WorkerPool().RegisterNode(daemon.WorkerNode{
+		ID:      "node-fresh",
+		Address: "10.0.0.2:7420",
+		MaxApps: 4,
+	}); err != nil {
+		t.Fatalf("register fresh node: %v", err)
+	}
+	if err := seed.SaveState(statePath); err != nil {
+		t.Fatalf("save seed state: %v", err)
+	}
+
+	t.Setenv("SMALLCLOUD_ROLLOVER_INTERVAL", "15ms")
+	t.Setenv("SMALLCLOUD_WORKER_TTL", "150ms")
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	var out bytes.Buffer
+	if err := ServeWithContext(ctx, "127.0.0.1:0", stateDir, &out); err != nil {
+		t.Fatalf("ServeWithContext failed: %v", err)
+	}
+
+	reloaded := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	if err := reloaded.LoadState(statePath); err != nil {
+		t.Fatalf("reload state: %v", err)
+	}
+	nodes := reloaded.WorkerPool().ListNodes()
+	if len(nodes) != 1 || nodes[0].ID != "node-fresh" {
+		t.Fatalf("expected only node-fresh to remain after reaping, got %+v", nodes)
+	}
+}
+
 func TestCLIDoctorLive(t *testing.T) {
 	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
 	stateDir := t.TempDir()

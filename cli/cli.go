@@ -372,31 +372,36 @@ func runMeter(args []string, d *daemon.Daemon, client *DaemonClient, statePath s
 	return writeJSON(stdout, st)
 }
 
+func parsePositiveDurationEnv(name string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, raw, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be > 0, got %s", name, parsed)
+	}
+	return parsed, nil
+}
+
 func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writer) error {
 	if addr == "" {
 		addr = "127.0.0.1:7420"
 	}
-	rolloverInterval := time.Hour
-	if raw := strings.TrimSpace(os.Getenv("SMALLCLOUD_ROLLOVER_INTERVAL")); raw != "" {
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return fmt.Errorf("invalid SMALLCLOUD_ROLLOVER_INTERVAL %q: %w", raw, err)
-		}
-		if parsed <= 0 {
-			return fmt.Errorf("SMALLCLOUD_ROLLOVER_INTERVAL must be > 0, got %s", parsed)
-		}
-		rolloverInterval = parsed
+	rolloverInterval, err := parsePositiveDurationEnv("SMALLCLOUD_ROLLOVER_INTERVAL", time.Hour)
+	if err != nil {
+		return err
 	}
-	var probeTimeout time.Duration
-	if raw := strings.TrimSpace(os.Getenv("SMALLCLOUD_HEALTH_PROBE_TIMEOUT")); raw != "" {
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return fmt.Errorf("invalid SMALLCLOUD_HEALTH_PROBE_TIMEOUT %q: %w", raw, err)
-		}
-		if parsed <= 0 {
-			return fmt.Errorf("SMALLCLOUD_HEALTH_PROBE_TIMEOUT must be > 0, got %s", parsed)
-		}
-		probeTimeout = parsed
+	probeTimeout, err := parsePositiveDurationEnv("SMALLCLOUD_HEALTH_PROBE_TIMEOUT", 0)
+	if err != nil {
+		return err
+	}
+	workerTTL, err := parsePositiveDurationEnv("SMALLCLOUD_WORKER_TTL", 5*time.Minute)
+	if err != nil {
+		return err
 	}
 	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
 	if caddyURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_CADDY_ADMIN_URL")); caddyURL != "" {
@@ -455,7 +460,10 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 			case <-rollCtx.Done():
 				return
 			case <-ticker.C:
-				if rolled := d.RolloverAll(time.Now().UTC()); rolled > 0 {
+				now := time.Now().UTC()
+				rolled := d.RolloverAll(now)
+				pruned := d.WorkerPool().PruneStale(workerTTL, now)
+				if rolled > 0 || pruned > 0 {
 					_ = d.SaveState(statePath)
 				}
 			}

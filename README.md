@@ -153,6 +153,7 @@ LOG_LEVEL = "info"
 | `SMALLCLOUD_ROLLOVER_INTERVAL` | Background interval for automated monthly billing-cycle rollover checks (e.g., `1h`). |
 | `SMALLCLOUD_RATE_LIMIT` | Maximum HTTP API requests per second allowed by `RateLimitMiddleware` (e.g., `20`). |
 | `SMALLCLOUD_ACCESS_LOG` | Log structured JSON HTTP access records to stderr (default `true`). |
+| `SMALLCLOUD_WORKER_TTL` | Stale worker-node reaper TTL in `smallcloud serve` (default `5m`). |
 
 ## Benchmark Results
 

@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Worker Node Lifecycle Endpoints & Client**: Added `DELETE /v1/nodes` and `GET /v1/nodes/select` on the control-plane daemon alongside `DaemonClient.RemoveNode`, `DaemonClient.HeartbeatNode`, and `DaemonClient.SelectNode` in the CLI client.
 - **Docker Container Privilege Hardening**: Enforced `--security-opt no-new-privileges:true` and `--cap-drop ALL` when launching containers in `daemon/runtime.go`.
 - **Daemon Microbenchmarks**: Added `daemon/bench_test.go` microbenchmarks for core control-plane paths.
+- **Stale Worker-Node Reaping**: Added `SMALLCLOUD_WORKER_TTL` stale worker-node reaping in `ServeWithContext` (default `5m`).
+- **Cgroup & Config Fuzz Tests**: Added `daemon/cgroup_test.go` and `FuzzConfigParse` in `pkg/config/fuzz_test.go`.
 
 ### Wave 7 — Distributed Edge, Zero-Trust Mesh & Developer Platform
 - **GitHub Webhook Git-Push Deployments**: HMAC-SHA256 webhook signature verification (`VerifyGitHubSignature`) and push event parsing (`ParseGitHubPushEvent`) in `daemon/gitops.go`.
