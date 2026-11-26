@@ -1945,3 +1945,104 @@ func TestServerRejectsCSRFContentType(t *testing.T) {
 		t.Fatalf("expected 200 for application/json on /v1/rollover, got %d: %s", jsonRec.Code, jsonRec.Body.String())
 	}
 }
+
+type blockingLogsRuntime struct {
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+}
+
+func (b *blockingLogsRuntime) Start(_ context.Context, spec ContainerSpec) (string, error) {
+	return fmt.Sprintf("127.0.0.1:%d", spec.Port), nil
+}
+
+func (b *blockingLogsRuntime) Stop(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (b *blockingLogsRuntime) Logs(_ context.Context, _, _, _ string, _ int) (string, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.release
+	return "ok\n", nil
+}
+
+func TestMaxInFlightOnServer(t *testing.T) {
+	t.Setenv("SMALLCLOUD_MAX_INFLIGHT", "")
+	if got := maxInFlightRequests(); got != 256 {
+		t.Fatalf("expected default maxInFlightRequests 256, got %d", got)
+	}
+	t.Setenv("SMALLCLOUD_MAX_INFLIGHT", "0")
+	if got := maxInFlightRequests(); got != 256 {
+		t.Fatalf("expected 0 to fall back to 256, got %d", got)
+	}
+	t.Setenv("SMALLCLOUD_MAX_INFLIGHT", "-5")
+	if got := maxInFlightRequests(); got != 256 {
+		t.Fatalf("expected negative to fall back to 256, got %d", got)
+	}
+
+	t.Setenv("SMALLCLOUD_MAX_INFLIGHT", "1")
+	if got := maxInFlightRequests(); got != 1 {
+		t.Fatalf("expected maxInFlightRequests 1, got %d", got)
+	}
+
+	d := newTestServerDaemon(t)
+	rt := &blockingLogsRuntime{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	d.SetRuntime(rt)
+	h := d.HandlerWithAuth("")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	inFlightRec := httptest.NewRecorder()
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodGet, "/v1/logs?org_id=acme&app=api&release_id=rel-1", nil)
+		h.ServeHTTP(inFlightRec, req)
+	}()
+
+	<-rt.started
+
+	shedReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	shedRec := httptest.NewRecorder()
+	h.ServeHTTP(shedRec, shedReq)
+	if shedRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 while in-flight limit reached, got %d: %s", shedRec.Code, shedRec.Body.String())
+	}
+	if got := shedRec.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("expected Retry-After 5, got %q", got)
+	}
+	if ct := shedRec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(shedRec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("unmarshal 503 body: %v", err)
+	}
+	if errBody["error"] != "server overloaded" {
+		t.Fatalf("expected error 'server overloaded', got %q", errBody["error"])
+	}
+
+	for _, exemptPath := range []string{"/healthz", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, exemptPath, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200 while saturated, got %d: %s", exemptPath, rec.Code, rec.Body.String())
+		}
+	}
+
+	close(rt.release)
+	wg.Wait()
+	if inFlightRec.Code != http.StatusOK {
+		t.Fatalf("expected in-flight request to return 200, got %d: %s", inFlightRec.Code, inFlightRec.Body.String())
+	}
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	afterRec := httptest.NewRecorder()
+	h.ServeHTTP(afterRec, afterReq)
+	if afterRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 after in-flight request completed, got %d: %s", afterRec.Code, afterRec.Body.String())
+	}
+}

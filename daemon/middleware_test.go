@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -432,5 +433,82 @@ func TestRejectFormContentTypeMiddleware(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMaxInFlightMiddleware(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+
+	h := MaxInFlightMiddleware(1)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			startOnce.Do(func() { close(started) })
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	slowRec := httptest.NewRecorder()
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodGet, "/slow", nil)
+		h.ServeHTTP(slowRec, req)
+	}()
+
+	<-started
+
+	overloadedReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	overloadedRec := httptest.NewRecorder()
+	h.ServeHTTP(overloadedRec, overloadedReq)
+	if overloadedRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when saturated, got %d: %s", overloadedRec.Code, overloadedRec.Body.String())
+	}
+	if got := overloadedRec.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("expected Retry-After 5, got %q", got)
+	}
+	if ct := overloadedRec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(overloadedRec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("unmarshal 503 body: %v", err)
+	}
+	if errBody["error"] != "server overloaded" {
+		t.Fatalf("expected error 'server overloaded', got %q", errBody["error"])
+	}
+
+	for _, exemptPath := range []string{"/healthz", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, exemptPath, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200 while saturated, got %d", exemptPath, rec.Code)
+		}
+	}
+
+	close(release)
+	wg.Wait()
+	if slowRec.Code != http.StatusOK {
+		t.Fatalf("expected slow request to return 200, got %d", slowRec.Code)
+	}
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	afterRec := httptest.NewRecorder()
+	h.ServeHTTP(afterRec, afterReq)
+	if afterRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 after slot released, got %d", afterRec.Code)
+	}
+
+	passThrough := MaxInFlightMiddleware(0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	passReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	passRec := httptest.NewRecorder()
+	passThrough.ServeHTTP(passRec, passReq)
+	if passRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when limit <= 0, got %d", passRec.Code)
 	}
 }

@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security, Concurrency & Operator UI
+- **HTTP Load Shedding (`MaxInFlightMiddleware`)**: Added `MaxInFlightMiddleware` (`SMALLCLOUD_MAX_INFLIGHT`, default `256`) to cap concurrent in-flight HTTP requests and shed excess load with HTTP `503` and `Retry-After: 5`.
+- **Container Fork-Bomb Protection**: Added `--pids-limit 256` to `DockerRuntime` container launches to mitigate PID exhaustion / fork bombs.
+- **Dependabot Configuration Cleanup**: Cleaned up `.github/dependabot.yml` to track `gomod` and `github-actions` updates.
 - **Per-Tenant Deploy Concurrency Lock**: Added `tenantLocks` in the control-plane daemon to serialize concurrent deployments per tenant while allowing deploys across different tenants to proceed independently.
 - **Trusted Proxy `ClientIP` Rate Limiting**: Added `SMALLCLOUD_TRUSTED_PROXIES` support so `ClientIP` honors `X-Forwarded-For` / `X-Real-IP` headers only from configured trusted proxy IPs or CIDRs when enforcing `RateLimitMiddleware`.
 - **Interactive Operator Web UI Actions**: Added interactive controls in the Operator Web UI for triggering `/v1/rollback`, `/v1/canary/reconcile`, and `/v1/prune`.

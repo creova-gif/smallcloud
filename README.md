@@ -167,6 +167,7 @@ LOG_LEVEL = "info"
 | `SMALLCLOUD_TRUSTED_PROXIES` | Comma-separated trusted proxy IPs or CIDRs used by `ClientIP` to honor `X-Forwarded-For` / `X-Real-IP` headers for `RateLimitMiddleware`. |
 | `SMALLCLOUD_ACCESS_LOG` | Log structured JSON HTTP access records to stderr (default `true`). |
 | `SMALLCLOUD_WORKER_TTL` | Stale worker-node reaper TTL in `smallcloud serve` (default `5m`). |
+| `SMALLCLOUD_MAX_INFLIGHT` | Maximum concurrent in-flight HTTP requests before `503` load shedding (default `256`). |
 
 ## Benchmark Results
 

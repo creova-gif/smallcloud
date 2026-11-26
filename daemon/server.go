@@ -123,10 +123,24 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	handler = RejectFormContentTypeMiddleware(handler)
 	trustedProxies := ParseTrustedProxies(os.Getenv("SMALLCLOUD_TRUSTED_PROXIES"))
 	handler = RateLimitMiddlewareWithProxies(NewRateLimiter(rateLimitPerMinute(), time.Minute), trustedProxies, nil)(handler)
+	handler = MaxInFlightMiddleware(maxInFlightRequests())(handler)
 	handler = metrics.Middleware(handler)
 	handler = SecurityHeadersMiddleware(handler)
 	handler = RequestIDMiddleware(handler)
 	return handler
+}
+
+func maxInFlightRequests() int {
+	const defaultMaxInFlight = 256
+	raw := strings.TrimSpace(os.Getenv("SMALLCLOUD_MAX_INFLIGHT"))
+	if raw == "" {
+		return defaultMaxInFlight
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return defaultMaxInFlight
+	}
+	return v
 }
 
 func rateLimitPerMinute() int {

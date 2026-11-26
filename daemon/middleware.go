@@ -294,6 +294,31 @@ func RateLimitMiddlewareWithProxies(limiter *RateLimiter, trusted []net.IPNet, n
 	}
 }
 
+func MaxInFlightMiddleware(limit int) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if limit <= 0 {
+			return next
+		}
+		sem := make(chan struct{}, limit)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+				next.ServeHTTP(w, r)
+			default:
+				w.Header().Set("Retry-After", "5")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error": "server overloaded"}`))
+			}
+		})
+	}
+}
+
 func RejectFormContentTypeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) &&

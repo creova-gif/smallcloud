@@ -646,6 +646,7 @@ func TestDockerRuntimeSecurityHardeningFlags(t *testing.T) {
 	requiredPairs := [][2]string{
 		{"--security-opt", "no-new-privileges:true"},
 		{"--cap-drop", "ALL"},
+		{"--pids-limit", "256"},
 	}
 
 	for _, pair := range requiredPairs {

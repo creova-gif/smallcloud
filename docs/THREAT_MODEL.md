@@ -81,11 +81,13 @@ This document describes SmallCloud's security assets, trust boundaries, STRIDE t
 | Threat | Mitigation | Implementation |
 | --- | --- | --- |
 | API request flooding & rate-limiter memory exhaustion | `RateLimitMiddleware` enforces per-client fixed-window limits (default `600`/min or `SMALLCLOUD_RATE_LIMIT`, exempting `/healthz` and `/readyz`), returns HTTP `429` with `Retry-After: 60`, and caps the map at `maxRateLimiterKeys = 4096` with eviction (`evictLocked`). | `RateLimiter`, `RateLimitMiddleware` (`daemon/middleware.go`), `rateLimitPerMinute` (`daemon/server.go`) |
+| Concurrent request saturation | `MaxInFlightMiddleware` caps concurrent in-flight HTTP requests (`SMALLCLOUD_MAX_INFLIGHT`, default `256`) and sheds excess load with HTTP `503` and `Retry-After: 5`. | `MaxInFlightMiddleware` (`daemon/middleware.go`), `daemon/server.go` |
 | Oversized request payloads | `http.MaxBytesReader` caps JSON payloads and GitHub webhooks at `1 MiB` (`maxRequestBodyBytes = 1 << 20`) and backup uploads at `64 MiB` (`maxRestoreBodyBytes = 64 << 20`), returning HTTP `413`. | `decodeJSONBody`, `handleGitHubWebhook`, `handleRestore` (`daemon/server.go`) |
 | Tar-bomb / oversized metadata entries on restore | `readBoundedTarEntry` wraps tar reads in `io.LimitReader(tr, limit+1)` with `maxManifestBytes = 1 << 20` (`1 MiB`) for `manifest.json` and `maxSidecarBytes = 4096` (`4 KiB`) for `replica.db.sha256`. | `readBoundedTarEntry` (`daemon/backup.go`) |
 | Slowloris / stalled HTTP connections | `http.Server` configures `ReadHeaderTimeout: 5s`, `ReadTimeout: 15s`, `WriteTimeout: 30s`, `IdleTimeout: 60s`, and `MaxHeaderBytes: 1 MiB`. | `cli/cli.go` |
 | Runaway cloud/compute spend | Hard monthly spend cap (`budget.hard_stop` cannot be disabled; `max_monthly_usd` capped at `10000`) and org quotas trip `ErrBudgetExceeded` / `ErrOrgQuotaExceeded` (HTTP `402`), and halted Caddy routes return `402` with `Retry-After: 3600`. | `BudgetTracker` (`daemon/budget.go`), `Config.Validate` (`pkg/config/config.go`), `RenderCaddyfile` (`daemon/proxy.go`), `daemon/server.go` |
 | CPU/memory exhaustion by tenant workloads | cgroups v2 `cpu.max` (`cgroupPeriodMicros = 100000`) and `memory.max`, plus Docker `--cpus` and `--memory` flags (`100..16000` millicores, `64..65536` MiB). | `CgroupManager.Apply` (`daemon/cgroup.go`), `DockerRuntime.Start` (`daemon/runtime.go`), `Config.Validate` (`pkg/config/config.go`) |
+| Container fork bombs / PID exhaustion | `DockerRuntime` enforces `--pids-limit 256` on launched containers to prevent process-table exhaustion. | `DockerRuntime.Start` (`daemon/runtime.go`) |
 
 ## 4. Residual Risks & Operational Guidance
 
