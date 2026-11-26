@@ -32,3 +32,4 @@ smallcloud-state/
 
 # Scratch
 .gstack/tmp/
+!.env.example

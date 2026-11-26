@@ -223,6 +223,35 @@ const uiHTML = `<!DOCTYPE html>
     font-size: 0.875rem;
     padding: 12px 0;
   }
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+    background: transparent;
+    border: none;
+    padding: 0;
+    border-radius: 0;
+  }
+  .kpi-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .kpi-label {
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .kpi-value {
+    margin-top: 6px;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
   @media (max-width: 640px) {
     .container {
       padding: 16px 12px 36px;
@@ -233,6 +262,9 @@ const uiHTML = `<!DOCTYPE html>
     input[type="password"], input[type="text"] {
       min-width: 0;
       flex: 1 1 160px;
+    }
+    .kpi-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     section {
       padding: 14px 12px;
@@ -259,12 +291,39 @@ const uiHTML = `<!DOCTYPE html>
   <div id="status-banner" class="banner success" role="status" aria-live="polite"></div>
 
   <main id="main-content">
+    <section class="kpi-grid" aria-label="Fleet summary">
+      <div class="kpi-card">
+        <div class="kpi-label">Apps</div>
+        <div id="kpi-apps" class="kpi-value">0</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Halted</div>
+        <div id="kpi-halted" class="kpi-value">0</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Monthly Spend</div>
+        <div id="kpi-spend" class="kpi-value">$0.00</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Worker Nodes</div>
+        <div id="kpi-nodes" class="kpi-value">0</div>
+      </div>
+    </section>
+
     <section aria-labelledby="apps-heading">
       <div class="section-head">
         <h2 id="apps-heading">Apps</h2>
         <span id="apps-count" class="meta">0 apps</span>
       </div>
       <div id="apps-container"></div>
+    </section>
+
+    <section aria-labelledby="nodes-heading">
+      <div class="section-head">
+        <h2 id="nodes-heading">Worker Nodes</h2>
+        <span id="nodes-count" class="meta">0 nodes</span>
+      </div>
+      <div id="nodes-container"></div>
     </section>
 
     <section aria-labelledby="events-heading">
@@ -298,11 +357,18 @@ const uiHTML = `<!DOCTYPE html>
   var TOKEN_KEY = "smallcloud_bearer_token";
   var tokenInput = document.getElementById("token-input");
   var refreshBtn = document.getElementById("refresh-btn");
+  var mainContent = document.getElementById("main-content");
   var errorBanner = document.getElementById("error-banner");
   var statusBanner = document.getElementById("status-banner");
+  var kpiApps = document.getElementById("kpi-apps");
+  var kpiHalted = document.getElementById("kpi-halted");
+  var kpiSpend = document.getElementById("kpi-spend");
+  var kpiNodes = document.getElementById("kpi-nodes");
   var appsContainer = document.getElementById("apps-container");
+  var nodesContainer = document.getElementById("nodes-container");
   var eventsContainer = document.getElementById("events-container");
   var appsCount = document.getElementById("apps-count");
+  var nodesCount = document.getElementById("nodes-count");
   var eventsCount = document.getElementById("events-count");
   var eventTypeFilter = document.getElementById("event-type-filter");
 
@@ -409,6 +475,9 @@ const uiHTML = `<!DOCTYPE html>
       rollbackBtn.type = "button";
       rollbackBtn.setAttribute("aria-label", "Rollback " + appLabel);
       rollbackBtn.addEventListener("click", function() {
+        if (!window.confirm("Roll back " + appLabel + " to its previous release?")) {
+          return;
+        }
         runAppAction("Rollback", "/v1/rollback", { org_id: app.org_id, app_name: app.app_name }, rollbackBtn);
       });
       actionsWrap.appendChild(rollbackBtn);
@@ -438,6 +507,61 @@ const uiHTML = `<!DOCTYPE html>
     var tableWrap = el("div", "table-wrap");
     tableWrap.appendChild(table);
     appsContainer.appendChild(tableWrap);
+  }
+
+  function renderSummary(apps, nodes) {
+    var haltedCount = 0;
+    var totalSpend = 0;
+    apps.forEach(function(app) {
+      var route = app.route || {};
+      var budget = app.budget || {};
+      if (route.halted || budget.halted) {
+        haltedCount++;
+      }
+      totalSpend += Number(budget.current_usd || 0);
+    });
+    kpiApps.textContent = String(apps.length);
+    kpiHalted.textContent = String(haltedCount);
+    kpiSpend.textContent = formatUSD(totalSpend);
+    kpiNodes.textContent = String(nodes.length);
+  }
+
+  function renderNodes(nodes) {
+    nodesContainer.innerHTML = "";
+    nodesCount.textContent = nodes.length + (nodes.length === 1 ? " node" : " nodes");
+    if (!nodes.length) {
+      nodesContainer.appendChild(el("div", "empty", "No worker nodes registered."));
+      return;
+    }
+
+    var table = document.createElement("table");
+    var thead = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    headRow.innerHTML = '<th scope="col">ID</th><th scope="col">Region</th><th scope="col">Address</th><th scope="col">Active / Max</th><th scope="col">Status</th>';
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement("tbody");
+    nodes.forEach(function(node) {
+      var tr = document.createElement("tr");
+      var healthy = Boolean(node.healthy);
+      var capacity = (node.active_apps || 0) + " / " + (node.max_apps || 0);
+
+      tr.appendChild(el("td", "mono", node.id || ""));
+      tr.appendChild(el("td", "mono", node.region || "-"));
+      tr.appendChild(el("td", "mono", node.address || "-"));
+      tr.appendChild(el("td", "mono", capacity));
+
+      var statusCell = document.createElement("td");
+      statusCell.appendChild(el("span", healthy ? "badge badge-green" : "badge badge-red", healthy ? "healthy" : "unhealthy"));
+      tr.appendChild(statusCell);
+
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    var tableWrap = el("div", "table-wrap");
+    tableWrap.appendChild(table);
+    nodesContainer.appendChild(tableWrap);
   }
 
   function renderEvents(events) {
@@ -548,17 +672,29 @@ const uiHTML = `<!DOCTYPE html>
 
   function refreshAll() {
     refreshBtn.disabled = true;
+    refreshBtn.textContent = "Refreshing...";
+    refreshBtn.setAttribute("aria-busy", "true");
+    mainContent.setAttribute("aria-busy", "true");
     showError("");
     Promise.all([
       fetchJSON("/v1/apps"),
+      fetchJSON("/v1/nodes"),
       fetchJSON(eventsPath())
     ]).then(function(results) {
-      renderApps((results[0] && results[0].apps) || []);
-      renderEvents((results[1] && results[1].events) || []);
+      var apps = (results[0] && results[0].apps) || [];
+      var nodes = (results[1] && results[1].nodes) || [];
+      var events = (results[2] && results[2].events) || [];
+      renderSummary(apps, nodes);
+      renderApps(apps);
+      renderNodes(nodes);
+      renderEvents(events);
     }).catch(function(err) {
       showError(err && err.message ? err.message : "Failed to load dashboard data.");
     }).finally(function() {
       refreshBtn.disabled = false;
+      refreshBtn.textContent = "Refresh";
+      refreshBtn.removeAttribute("aria-busy");
+      mainContent.removeAttribute("aria-busy");
     });
   }
 

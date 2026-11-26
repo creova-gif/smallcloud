@@ -186,6 +186,10 @@ for i in 1 2 3 4 5 6 7; do /tmp/smallcloud-bin eval; done
 ## Documentation
 
 - [ADR-001: SmallCloud Architecture Decision Record](docs/adr/001-small-software-architecture.md)
+- [ADR-002: Control-Plane Hardening, State Durability, and Disaster Recovery](docs/adr/002-control-plane-hardening-and-dr.md)
+- [Production Deployment Guide & DR Runbook](docs/DEPLOYMENT.md)
+- [Security Policy](SECURITY.md)
+- [Environment Configuration Template](.env.example)
 - [Threat Model](docs/THREAT_MODEL.md)
 - [OpenAPI 3.1 Specification](docs/openapi.yaml)
 - [Contributing Guide](CONTRIBUTING.md)

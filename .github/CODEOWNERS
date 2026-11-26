@@ -1,0 +1,10 @@
+# Default repository ownership
+* @creova-gif
+
+# Scoped component ownership
+/daemon/ @creova-gif
+/cli/ @creova-gif
+/pkg/ @creova-gif
+/.github/ @creova-gif
+/docs/ @creova-gif
+SECURITY.md @creova-gif

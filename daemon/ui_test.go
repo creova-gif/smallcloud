@@ -51,6 +51,11 @@ func TestUIDashboardRoutes(t *testing.T) {
 					`scope="col"`,
 					"main-content",
 					"event-type-filter",
+					"kpi-grid",
+					"nodes-heading",
+					"/v1/nodes",
+					"aria-busy",
+					"window.confirm",
 				} {
 					if !strings.Contains(body, want) {
 						t.Fatalf("GET %s body missing %q", path, want)

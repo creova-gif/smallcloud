@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Operator Web UI Accessibility & Filtering**: Updated `daemon/ui.go` with WCAG 2.1 AA accessibility improvements, `:focus-visible` focus rings, ARIA live regions, responsive table wrappers, and an audit event-type filter.
 - **OpenAPI 3.1.0 Specification**: Added `docs/openapi.yaml` documenting the SmallCloud control-plane HTTP API.
 - **End-to-End HTTP Integration Suite**: Added `cli/e2e_test.go` covering full-product end-to-end HTTP integration workflows.
+- **Operator UI KPI Cards & Worker Nodes View**: Added summary KPI cards and a Worker Nodes panel to the embedded Operator Web UI (`daemon/ui.go`).
+- **Control-Plane Load Tests**: Added `daemon/load_test.go` exercising concurrent control-plane workloads.
+- **Environment Template & Repository Governance**: Added `.env.example`, `.github/CODEOWNERS`, and `.github/dependabot.yml`.
+- **ADR-002 & Production Deployment Runbook**: Added `docs/adr/002-control-plane-hardening-and-dr.md` and `docs/DEPLOYMENT.md`.
 
 ## [v0.2.0] - 2026-11-26
 
