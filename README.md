@@ -11,8 +11,9 @@ SmallCloud deploys single-node web applications from a repository to HTTPS in un
 
 - `pkg/config/` parses `smallcloud.toml` and validates `org_id` tenant scoping and `max_monthly_usd` limits.
 - `daemon/` writes cgroups v2 files (`cpu.max`, `memory.max`), syncs and restores SQLite files, swaps Blue and Green Caddy routes, and trips the spend circuit breaker.
-- `cli/` implements the `smallcloud` commands (`package`, `deploy`, `rollback`, `eval`) with main entrypoint `cli/cmd/smallcloud/main.go`.
+- `cli/` implements the `smallcloud` commands (`init`, `doctor`, `package`, `deploy`, `rollback`, `status`, `list`, `budget`, `meter`, `rollover`, `serve`, `eval`) with main entrypoint `cli/cmd/smallcloud/main.go`.
 - `templates/fastapi-sqlite/` contains a Python 3.12 FastAPI and SQLite starter application with `Dockerfile`, `Caddyfile`, `litestream.yml`, and `smallcloud.toml`.
+- `templates/node-sqlite/` contains a zero-dependency Node.js 22 ESM HTTP starter application with `Dockerfile`, `smallcloud.toml`, `server.mjs`, and `test_server.mjs`.
 
 ## Run the CLI
 
@@ -23,12 +24,21 @@ SmallCloud deploys single-node web applications from a repository to HTTPS in un
 	go run ./cli/cmd/smallcloud deploy ./templates/fastapi-sqlite v1.0.0
 	go run ./cli/cmd/smallcloud rollback ./templates/fastapi-sqlite
 	go run ./cli/cmd/smallcloud status ./templates/fastapi-sqlite
+	go run ./cli/cmd/smallcloud list
 	go run ./cli/cmd/smallcloud budget set ./templates/fastapi-sqlite 10.00
+	go run ./cli/cmd/smallcloud meter ./templates/fastapi-sqlite 1.25
+	go run ./cli/cmd/smallcloud rollover
 	go run ./cli/cmd/smallcloud serve --addr 127.0.0.1:7420
 	go run ./cli/cmd/smallcloud eval
 ```
 
-Set `SMALLCLOUD_API_TOKEN` to require `Authorization: Bearer <token>` on `/v1/*` HTTP endpoints (`/healthz` stays open).
+You can also scaffold or deploy the Node.js starter at `templates/node-sqlite/` (for example, `go run ./cli/cmd/smallcloud deploy ./templates/node-sqlite v1.0.0`).
+
+Environment variables:
+- `SMALLCLOUD_DAEMON_URL`: base URL of a running `smallcloud serve` daemon (for example, `http://127.0.0.1:7420`) so CLI commands talk to the daemon over HTTP instead of local state files.
+- `SMALLCLOUD_API_TOKEN`: require `Authorization: Bearer <token>` on `/v1/*` HTTP endpoints (`/healthz` stays open) and attach the token from the CLI when `SMALLCLOUD_DAEMON_URL` is set.
+- `SMALLCLOUD_CADDY_ADMIN_URL`: Caddy Admin API URL used when syncing live Blue/Green routes.
+- `SMALLCLOUD_RUNTIME`: container/process runtime backend selection for `smallcloud` deployments (for example, `dockerfile`).
 
 ## Benchmark results
 

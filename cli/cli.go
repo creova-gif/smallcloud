@@ -304,11 +304,59 @@ func runBudget(args []string, d *daemon.Daemon, client *DaemonClient, statePath 
 	return writeJSON(stdout, st)
 }
 
+func runMeter(args []string, d *daemon.Daemon, client *DaemonClient, statePath string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: smallcloud meter [dir] <delta_usd>")
+	}
+	dir := "."
+	rawDelta := args[0]
+	if len(args) >= 2 {
+		dir = args[0]
+		rawDelta = args[1]
+	}
+	deltaUSD, err := strconv.ParseFloat(rawDelta, 64)
+	if err != nil {
+		return fmt.Errorf("invalid delta_usd %q: %w", rawDelta, err)
+	}
+
+	cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+	if err != nil {
+		return err
+	}
+
+	if client != nil {
+		st, err := client.Meter(context.Background(), cfg.App.OrgID, cfg.App.Name, deltaUSD)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, st)
+	}
+
+	st, err := d.RecordSpend(cfg.App.OrgID, cfg.App.Name, deltaUSD)
+	if err != nil {
+		if errors.Is(err, daemon.ErrBudgetExceeded) {
+			_ = d.SaveState(statePath)
+			_ = writeJSON(stdout, st)
+		}
+		return err
+	}
+	if err := d.SaveState(statePath); err != nil {
+		return err
+	}
+	return writeJSON(stdout, st)
+}
+
 func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writer) error {
 	if addr == "" {
 		addr = "127.0.0.1:7420"
 	}
 	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	if caddyURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_CADDY_ADMIN_URL")); caddyURL != "" {
+		d.Router().SetApplier(daemon.HTTPAdminApplier{AdminURL: caddyURL})
+	}
+	if strings.TrimSpace(os.Getenv("SMALLCLOUD_RUNTIME")) == "docker" {
+		d.SetRuntime(&daemon.DockerRuntime{})
+	}
 	statePath := filepath.Join(stateDir, "state.json")
 	if err := d.LoadState(statePath); err != nil {
 		return err
@@ -353,7 +401,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|meter|rollover|list|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -393,7 +441,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -494,6 +542,41 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 
 	case "budget":
 		return runBudget(args[1:], d, client, statePath, stdout)
+
+	case "meter":
+		return runMeter(args[1:], d, client, statePath, stdout)
+
+	case "rollover":
+		ts := time.Now().UTC()
+		if len(args) > 1 {
+			parsed, err := time.Parse(time.RFC3339, args[1])
+			if err != nil {
+				return fmt.Errorf("invalid RFC3339 timestamp %q: %w", args[1], err)
+			}
+			ts = parsed.UTC()
+		}
+		if client != nil {
+			n, err := client.Rollover(context.Background(), ts)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, map[string]any{"rolled_over": n, "timestamp": ts})
+		}
+		n := d.RolloverAll(ts)
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]any{"rolled_over": n, "timestamp": ts})
+
+	case "list", "ps":
+		if client != nil {
+			apps, err := client.ListApps(context.Background())
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, map[string]any{"apps": apps})
+		}
+		return writeJSON(stdout, map[string]any{"apps": d.ListApps()})
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)

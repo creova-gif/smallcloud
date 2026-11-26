@@ -186,3 +186,30 @@ func (c *DaemonClient) Rollover(ctx context.Context, ts time.Time) (int, error) 
 	}
 	return out.RolledOver, nil
 }
+
+func (c *DaemonClient) Meter(ctx context.Context, orgID, appName string, deltaUSD float64) (daemon.AppBudgetState, error) {
+	req := struct {
+		OrgID    string  `json:"org_id"`
+		AppName  string  `json:"app_name"`
+		DeltaUSD float64 `json:"delta_usd"`
+	}{
+		OrgID:    orgID,
+		AppName:  appName,
+		DeltaUSD: deltaUSD,
+	}
+	var out daemon.AppBudgetState
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/meter", req, &out); err != nil {
+		return daemon.AppBudgetState{}, err
+	}
+	return out, nil
+}
+
+func (c *DaemonClient) ListApps(ctx context.Context) ([]daemon.AppStatus, error) {
+	var out struct {
+		Apps []daemon.AppStatus `json:"apps"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/apps", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Apps, nil
+}

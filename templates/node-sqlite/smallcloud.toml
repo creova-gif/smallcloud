@@ -1,0 +1,21 @@
+[app]
+name = "node-starter"
+org_id = "org-indie-default"
+domain = "node-starter.smallcloud.dev"
+port = 8080
+healthcheck = "/healthz"
+runtime = "dockerfile"
+
+[resources]
+cpu_millicores = 500
+memory_mb = 256
+
+[budget]
+max_monthly_usd = 5.00
+alert_at_pct = 80.0
+hard_stop = true
+
+[storage]
+sqlite_path = "/data/app.db"
+replica_url = "gs://smallcloud-replicas/org-indie-default/node-starter"
+sync_ms = 1000

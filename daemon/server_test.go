@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/creova-gif/smallcloud/pkg/config"
 )
 
 func newTestServerDaemon(t *testing.T) *Daemon {
@@ -139,6 +141,26 @@ func TestHandlerWithAuth(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
+			name:       "v1 apps missing header",
+			method:     http.MethodGet,
+			path:       "/v1/apps",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "v1 apps wrong token",
+			method:     http.MethodGet,
+			path:       "/v1/apps",
+			authHeader: "Bearer wrong-token",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "v1 apps valid token",
+			method:     http.MethodGet,
+			path:       "/v1/apps",
+			authHeader: "Bearer top-secret",
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:       "v1 rollover wrong scheme",
 			method:     http.MethodPost,
 			path:       "/v1/rollover",
@@ -214,5 +236,103 @@ func TestHandlerEnvAuth(t *testing.T) {
 	openHandler.ServeHTTP(openRec, openReq)
 	if openRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 when SMALLCLOUD_API_TOKEN is empty, got %d: %s", openRec.Code, openRec.Body.String())
+	}
+}
+
+func TestListAppsEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("")
+
+	emptyReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	emptyRec := httptest.NewRecorder()
+	h.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", emptyRec.Code, emptyRec.Body.String())
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(emptyRec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal empty apps: %v", err)
+	}
+	if string(raw["apps"]) != "[]" {
+		t.Fatalf("expected empty apps array [], got %s", string(raw["apps"]))
+	}
+
+	deploySpecs := []struct {
+		orgID   string
+		appName string
+		domain  string
+	}{
+		{orgID: "org-beta", appName: "zulu", domain: "zulu.smallcloud.dev"},
+		{orgID: "org-alpha", appName: "zeta", domain: "zeta.smallcloud.dev"},
+		{orgID: "org-alpha", appName: "api", domain: "api.smallcloud.dev"},
+	}
+
+	for _, spec := range deploySpecs {
+		cfg := &config.Config{
+			App: config.AppConfig{
+				Name:        spec.appName,
+				OrgID:       spec.orgID,
+				Domain:      spec.domain,
+				Port:        8000,
+				Healthcheck: "/healthz",
+				Runtime:     "dockerfile",
+			},
+			Resources: config.ResourcesConfig{
+				CPUMillicores: 250,
+				MemoryMB:      128,
+			},
+			Budget: config.BudgetConfig{
+				MaxMonthlyUSD: 10.0,
+				AlertAtPct:    80.0,
+				HardStop:      true,
+			},
+			Storage: config.StorageConfig{
+				SQLitePath: "/data/" + spec.appName + ".db",
+				SyncMs:     1000,
+			},
+		}
+		if _, err := d.Deploy(cfg, "v1.0.0"); err != nil {
+			t.Fatalf("deploy %s/%s failed: %v", spec.orgID, spec.appName, err)
+		}
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+
+	var resp struct {
+		Apps []AppStatus `json:"apps"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal apps response: %v", err)
+	}
+	if len(resp.Apps) != 3 {
+		t.Fatalf("expected 3 apps, got %d", len(resp.Apps))
+	}
+
+	wantOrder := []struct {
+		orgID   string
+		appName string
+		domain  string
+	}{
+		{orgID: "org-alpha", appName: "api", domain: "api.smallcloud.dev"},
+		{orgID: "org-alpha", appName: "zeta", domain: "zeta.smallcloud.dev"},
+		{orgID: "org-beta", appName: "zulu", domain: "zulu.smallcloud.dev"},
+	}
+	for i, want := range wantOrder {
+		got := resp.Apps[i]
+		if got.OrgID != want.orgID || got.AppName != want.appName {
+			t.Fatalf("apps[%d]: expected %s/%s, got %s/%s", i, want.orgID, want.appName, got.OrgID, got.AppName)
+		}
+		if got.Route.Domain != want.domain || got.Route.ActiveReleaseID != "v1.0.0" {
+			t.Fatalf("apps[%d]: unexpected route %+v", i, got.Route)
+		}
+		if got.Budget.MaxMonthlyUSD != 10.0 {
+			t.Fatalf("apps[%d]: unexpected budget %+v", i, got.Budget)
+		}
 	}
 }

@@ -46,6 +46,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("GET /healthz", d.handleHealthz)
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
+	mux.HandleFunc("GET /v1/apps", d.handleListApps)
 	mux.HandleFunc("GET /v1/status", d.handleStatus)
 	mux.HandleFunc("POST /v1/meter", d.handleMeter)
 	mux.HandleFunc("POST /v1/rollover", d.handleRollover)
@@ -154,6 +155,12 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeHTTPJSON(w, http.StatusOK, st)
+}
+
+func (d *Daemon) handleListApps(w http.ResponseWriter, r *http.Request) {
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"apps": d.ListApps(),
+	})
 }
 
 func (d *Daemon) handleMeter(w http.ResponseWriter, r *http.Request) {

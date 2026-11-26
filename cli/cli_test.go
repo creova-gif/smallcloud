@@ -222,4 +222,112 @@ func TestCLIRemoteDaemonEnvRouting(t *testing.T) {
 	if rolled.ActiveReleaseID != "v2.0.0" {
 		t.Fatalf("expected rollback to v2.0.0, got %+v", rolled)
 	}
+
+	out.Reset()
+	if err := Run([]string{"meter", templateDir, "2.5"}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli meter failed: %v", err)
+	}
+	var metered daemon.AppBudgetState
+	if err := json.Unmarshal(out.Bytes(), &metered); err != nil {
+		t.Fatalf("unmarshal remote meter: %v", err)
+	}
+	if metered.CurrentUSD != 2.5 {
+		t.Fatalf("expected current_usd 2.5, got %v", metered.CurrentUSD)
+	}
+
+	out.Reset()
+	if err := Run([]string{"list"}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli list failed: %v", err)
+	}
+	var listOut struct {
+		Apps []daemon.AppStatus `json:"apps"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &listOut); err != nil {
+		t.Fatalf("unmarshal remote list: %v", err)
+	}
+	if len(listOut.Apps) != 1 || listOut.Apps[0].AppName != "fastapi-starter" {
+		t.Fatalf("unexpected remote list apps: %+v", listOut.Apps)
+	}
+
+	out.Reset()
+	if err := Run([]string{"rollover", "2099-02-01T00:00:00Z"}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli rollover failed: %v", err)
+	}
+	var rollOut struct {
+		RolledOver int       `json:"rolled_over"`
+		Timestamp  time.Time `json:"timestamp"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rollOut); err != nil {
+		t.Fatalf("unmarshal remote rollover: %v", err)
+	}
+	if rollOut.RolledOver != 1 || !rollOut.Timestamp.Equal(time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected remote rollover output: %+v", rollOut)
+	}
+}
+
+func TestCLILocalMeterRolloverAndList(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, stateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("local deploy failed: %v", err)
+	}
+
+	var meterOut bytes.Buffer
+	if err := Run([]string{"meter", templateDir, "1.25"}, stateDir, &meterOut); err != nil {
+		t.Fatalf("local meter failed: %v", err)
+	}
+	var metered daemon.AppBudgetState
+	if err := json.Unmarshal(meterOut.Bytes(), &metered); err != nil {
+		t.Fatalf("unmarshal local meter: %v", err)
+	}
+	if metered.CurrentUSD != 1.25 {
+		t.Fatalf("expected current_usd 1.25, got %v", metered.CurrentUSD)
+	}
+
+	var listOut bytes.Buffer
+	if err := Run([]string{"list"}, stateDir, &listOut); err != nil {
+		t.Fatalf("local list failed: %v", err)
+	}
+	var listed struct {
+		Apps []daemon.AppStatus `json:"apps"`
+	}
+	if err := json.Unmarshal(listOut.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal local list: %v", err)
+	}
+	if len(listed.Apps) != 1 || listed.Apps[0].Budget.CurrentUSD != 1.25 {
+		t.Fatalf("unexpected local list output: %+v", listed.Apps)
+	}
+
+	var psOut bytes.Buffer
+	if err := Run([]string{"ps"}, stateDir, &psOut); err != nil {
+		t.Fatalf("local ps failed: %v", err)
+	}
+
+	var rollOut bytes.Buffer
+	if err := Run([]string{"rollover", "2099-03-01T00:00:00Z"}, stateDir, &rollOut); err != nil {
+		t.Fatalf("local rollover failed: %v", err)
+	}
+	var rolled struct {
+		RolledOver int       `json:"rolled_over"`
+		Timestamp  time.Time `json:"timestamp"`
+	}
+	if err := json.Unmarshal(rollOut.Bytes(), &rolled); err != nil {
+		t.Fatalf("unmarshal local rollover: %v", err)
+	}
+	if rolled.RolledOver != 1 || !rolled.Timestamp.Equal(time.Date(2099, 3, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected local rollover output: %+v", rolled)
+	}
+
+	var statusOut bytes.Buffer
+	if err := Run([]string{"status", templateDir}, stateDir, &statusOut); err != nil {
+		t.Fatalf("local status after rollover failed: %v", err)
+	}
+	var st daemon.AppStatus
+	if err := json.Unmarshal(statusOut.Bytes(), &st); err != nil {
+		t.Fatalf("unmarshal status after rollover: %v", err)
+	}
+	if st.Budget.CurrentUSD != 0 {
+		t.Fatalf("expected current_usd reset to 0 after rollover, got %v", st.Budget.CurrentUSD)
+	}
 }

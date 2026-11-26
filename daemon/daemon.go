@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -334,6 +335,90 @@ func (d *Daemon) Status(orgID, appName string) (AppStatus, error) {
 		Budget:       budgetState,
 		LastSnapshot: snapCopy,
 	}, nil
+}
+
+func (d *Daemon) ListApps() []AppStatus {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	routes := d.router.SnapshotRoutes()
+
+	d.metaMu.RLock()
+	metaCopy := make(map[string]AppMeta, len(d.appMeta))
+	for k, v := range d.appMeta {
+		metaCopy[k] = v
+	}
+	snapCopy := make(map[string]*SnapshotMetadata, len(d.snapshots))
+	for k, v := range d.snapshots {
+		if v == nil {
+			continue
+		}
+		cp := *v
+		snapCopy[k] = &cp
+	}
+	d.metaMu.RUnlock()
+
+	keys := make(map[string]struct{}, len(routes)+len(metaCopy))
+	for k := range routes {
+		keys[k] = struct{}{}
+	}
+	for k := range metaCopy {
+		keys[k] = struct{}{}
+	}
+
+	apps := make([]AppStatus, 0, len(keys))
+	for k := range keys {
+		meta, hasMeta := metaCopy[k]
+		routePtr, hasRoute := routes[k]
+
+		orgID := meta.OrgID
+		appName := meta.AppName
+		var route RouteEntry
+		if hasRoute && routePtr != nil {
+			route = *routePtr
+			if orgID == "" {
+				orgID = route.OrgID
+			}
+			if appName == "" {
+				appName = route.AppName
+			}
+		}
+		if (orgID == "" || appName == "") && hasMeta {
+			if parts := strings.SplitN(k, "/", 2); len(parts) == 2 {
+				if orgID == "" {
+					orgID = parts[0]
+				}
+				if appName == "" {
+					appName = parts[1]
+				}
+			}
+		}
+
+		budgetState, _ := d.budget.State(orgID, appName)
+
+		var snap *SnapshotMetadata
+		if s, ok := snapCopy[k]; ok && s != nil {
+			cp := *s
+			snap = &cp
+		}
+
+		apps = append(apps, AppStatus{
+			OrgID:        orgID,
+			AppName:      appName,
+			Route:        route,
+			Budget:       budgetState,
+			LastSnapshot: snap,
+		})
+	}
+
+	sort.Slice(apps, func(i, j int) bool {
+		if apps[i].OrgID != apps[j].OrgID {
+			return apps[i].OrgID < apps[j].OrgID
+		}
+		return apps[i].AppName < apps[j].AppName
+	})
+
+	return apps
 }
 
 func (d *Daemon) LoadState(path string) error {

@@ -106,6 +106,26 @@ func TestDaemonClientLifecycleAndAuth(t *testing.T) {
 		t.Fatalf("expected 1 rolled over app, got %d", rolled)
 	}
 
+	metered, err := client.Meter(ctx, cfg.App.OrgID, cfg.App.Name, 10.0)
+	if err != nil {
+		t.Fatalf("meter failed: %v", err)
+	}
+	if metered.CurrentUSD != 10.0 || metered.Halted {
+		t.Fatalf("unexpected metered state: %+v", metered)
+	}
+
+	if _, err := client.Meter(ctx, cfg.App.OrgID, cfg.App.Name, 15.0); !errors.Is(err, daemon.ErrBudgetExceeded) {
+		t.Fatalf("expected ErrBudgetExceeded on 402 meter, got %v", err)
+	}
+
+	apps, err := client.ListApps(ctx)
+	if err != nil {
+		t.Fatalf("list apps failed: %v", err)
+	}
+	if len(apps) != 1 || apps[0].OrgID != cfg.App.OrgID || apps[0].AppName != cfg.App.Name {
+		t.Fatalf("unexpected listed apps: %+v", apps)
+	}
+
 	unauthClient := NewDaemonClient(srv.URL, "wrong-tok")
 	_, err = unauthClient.Status(ctx, cfg.App.OrgID, cfg.App.Name)
 	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "unauthorized") {
