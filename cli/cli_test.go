@@ -123,6 +123,18 @@ func TestCLIDeployRollbackStatusBudgetAndEval(t *testing.T) {
 	if !report.Passed || report.HardStopEnforcement != 100.0 || report.DataLossBytes != 0 {
 		t.Fatalf("eval thresholds not met: %+v", report)
 	}
+
+	var doctorOut bytes.Buffer
+	if err := Run([]string{"doctor", templateDir}, stateDir, &doctorOut); err != nil {
+		t.Fatalf("cli doctor failed: %v", err)
+	}
+	var docReport DoctorReport
+	if err := json.Unmarshal(doctorOut.Bytes(), &docReport); err != nil {
+		t.Fatalf("unmarshal doctor report: %v", err)
+	}
+	if !docReport.Passed {
+		t.Fatalf("expected doctor Passed=true, got %+v", docReport)
+	}
 }
 
 func TestCLIServeGracefulShutdownAndPersist(t *testing.T) {

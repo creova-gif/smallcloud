@@ -1,9 +1,15 @@
 package daemon
 
 import (
+	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
@@ -27,13 +33,38 @@ type meterRequest struct {
 	MaxMonthlyUSD float64 `json:"max_monthly_usd"`
 }
 
+type rolloverRequest struct {
+	Timestamp time.Time `json:"timestamp"`
+}
+
 func (d *Daemon) Handler() http.Handler {
+	return d.HandlerWithAuth(os.Getenv("SMALLCLOUD_API_TOKEN"))
+}
+
+func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", d.handleHealthz)
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
 	mux.HandleFunc("GET /v1/status", d.handleStatus)
 	mux.HandleFunc("POST /v1/meter", d.handleMeter)
-	return mux
+	mux.HandleFunc("POST /v1/rollover", d.handleRollover)
+
+	if token == "" {
+		return mux
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			auth := r.Header.Get("Authorization")
+			const prefix = "Bearer "
+			if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) != 1 {
+				writeHTTPError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -158,6 +189,43 @@ func (d *Daemon) handleMeter(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeHTTPJSON(w, http.StatusOK, st)
+}
+
+func (d *Daemon) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeHTTPJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleRollover(w http.ResponseWriter, r *http.Request) {
+	ts := time.Now().UTC()
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeHTTPError(w, http.StatusRequestEntityTooLarge, "request body exceeds 1 MiB limit")
+				return
+			}
+			writeHTTPError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var req rolloverRequest
+			if err := json.Unmarshal(raw, &req); err != nil {
+				writeHTTPError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if !req.Timestamp.IsZero() {
+				ts = req.Timestamp.UTC()
+			}
+		}
+	}
+
+	count := d.RolloverAll(ts)
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"rolled_over": count,
+		"month":       ts.UTC().Format("2006-01"),
+	})
 }
 
 func isValidationError(err error) bool {

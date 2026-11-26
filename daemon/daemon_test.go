@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
@@ -353,5 +355,107 @@ func TestConcurrentSpendAndStatusRaceSafety(t *testing.T) {
 	}
 	if !st.Budget.Halted || !st.Route.Halted {
 		t.Fatalf("expected both budget and route halted after 25x$0.25, got %+v", st)
+	}
+}
+
+type stubContainerRuntime struct {
+	mu       sync.Mutex
+	started  []ContainerSpec
+	stopped  []string
+	upstream string
+	startErr error
+}
+
+func (s *stubContainerRuntime) Start(_ context.Context, spec ContainerSpec) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = append(s.started, spec)
+	if s.startErr != nil {
+		return "", s.startErr
+	}
+	if s.upstream != "" {
+		return s.upstream, nil
+	}
+	return "10.0.0.2:18001", nil
+}
+
+func (s *stubContainerRuntime) Stop(_ context.Context, orgID, appName, releaseID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = append(s.stopped, orgID+"/"+appName+"/"+releaseID)
+	return nil
+}
+
+func TestDaemonContainerRuntimeWiringAndRolloverAll(t *testing.T) {
+	d := NewDaemon(t.TempDir(), t.TempDir())
+	if _, ok := d.Runtime().(NoopRuntime); !ok {
+		t.Fatalf("expected default runtime to be NoopRuntime, got %T", d.Runtime())
+	}
+
+	rt := &stubContainerRuntime{upstream: "10.0.0.99:18001"}
+	d.SetRuntime(rt)
+	if d.Runtime() != rt {
+		t.Fatalf("expected SetRuntime to update runtime")
+	}
+
+	cfg := sampleConfig()
+	res, err := d.Deploy(cfg, "v1.0.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+	if res.Upstream != "10.0.0.99:18001" {
+		t.Fatalf("expected upstream 10.0.0.99:18001, got %q", res.Upstream)
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("expected 1 Start call, got %d", len(rt.started))
+	}
+	spec := rt.started[0]
+	if spec.OrgID != cfg.App.OrgID || spec.AppName != cfg.App.Name || spec.ReleaseID != "v1.0.0" ||
+		spec.AppDir != "." || spec.Port != 18001 || spec.CPUMillicores != cfg.Resources.CPUMillicores ||
+		spec.MemoryMB != cfg.Resources.MemoryMB || spec.SQLitePath != cfg.Storage.SQLitePath {
+		t.Fatalf("unexpected ContainerSpec: %+v", spec)
+	}
+
+	if _, err := d.RecordSpend(cfg.App.OrgID, cfg.App.Name, 5.00); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
+	}
+	if len(rt.stopped) != 1 || rt.stopped[0] != "org-alpha/micro-crm/v1.0.0" {
+		t.Fatalf("expected Stop on onHalt for org-alpha/micro-crm/v1.0.0, got %v", rt.stopped)
+	}
+
+	nextMonth := time.Now().UTC().AddDate(0, 1, 0)
+	rolled := d.RolloverAll(nextMonth)
+	if rolled != 1 {
+		t.Fatalf("expected RolloverAll to roll over 1 app, got %d", rolled)
+	}
+	st, err := d.Status(cfg.App.OrgID, cfg.App.Name)
+	if err != nil {
+		t.Fatalf("Status after RolloverAll failed: %v", err)
+	}
+	if st.Budget.Halted || st.Route.Halted {
+		t.Fatalf("expected budget and route unhalted after RolloverAll, got %+v", st)
+	}
+}
+
+func TestDaemonDeployStopsContainerOnSwapRouteFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "caddy error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := NewDaemon(t.TempDir(), t.TempDir())
+	d.Router().SetApplier(HTTPAdminApplier{AdminURL: srv.URL})
+	rt := &stubContainerRuntime{upstream: "127.0.0.1:18001"}
+	d.SetRuntime(rt)
+
+	cfg := sampleConfig()
+	if _, err := d.Deploy(cfg, "v1.0.0"); err == nil {
+		t.Fatal("expected Deploy to fail when SwapRoute fails")
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("expected 1 Start call, got %d", len(rt.started))
+	}
+	if len(rt.stopped) != 1 || rt.stopped[0] != "org-alpha/micro-crm/v1.0.0" {
+		t.Fatalf("expected Stop on SwapRoute failure, got %v", rt.stopped)
 	}
 }

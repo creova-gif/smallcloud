@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ type Daemon struct {
 	cgroups   *CgroupManager
 	storage   *StorageManager
 	router    *CaddyRouter
+	runtime   ContainerRuntime
 	seq       int
 	appMeta   map[string]AppMeta
 	snapshots map[string]*SnapshotMetadata
@@ -69,6 +71,7 @@ func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
 		cgroups:   NewCgroupManager(cgroupRoot),
 		storage:   NewStorageManager(replicaRoot),
 		router:    NewCaddyRouter(),
+		runtime:   NoopRuntime{},
 		appMeta:   make(map[string]AppMeta),
 		snapshots: make(map[string]*SnapshotMetadata),
 	}
@@ -76,6 +79,9 @@ func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
 		func(orgID, appName string) {
 			_, _ = d.syncWALIfPresent(orgID, appName)
 			d.router.HaltRoute(orgID, appName)
+			if route, ok := d.router.GetRoute(orgID, appName); ok && route.ActiveReleaseID != "" {
+				_ = d.Runtime().Stop(context.Background(), orgID, appName, route.ActiveReleaseID)
+			}
 		},
 		func(orgID, appName string) {
 			_ = d.router.ResumeRoute(orgID, appName)
@@ -88,6 +94,21 @@ func (d *Daemon) Budget() *BudgetTracker   { return d.budget }
 func (d *Daemon) Cgroups() *CgroupManager  { return d.cgroups }
 func (d *Daemon) Storage() *StorageManager { return d.storage }
 func (d *Daemon) Router() *CaddyRouter     { return d.router }
+
+func (d *Daemon) SetRuntime(rt ContainerRuntime) {
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
+	if rt == nil {
+		rt = NoopRuntime{}
+	}
+	d.runtime = rt
+}
+
+func (d *Daemon) Runtime() ContainerRuntime {
+	d.metaMu.RLock()
+	defer d.metaMu.RUnlock()
+	return d.runtime
+}
 
 func (d *Daemon) resolveHostSQLitePath(orgID, appName, cfgPath string) string {
 	if cfgPath == "" {
@@ -198,9 +219,23 @@ func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult
 	upstreamPort := 18000 + d.seq
 
 	coldStartBegin := time.Now()
-	upstream := fmt.Sprintf("127.0.0.1:%d", upstreamPort)
+	rt := d.Runtime()
+	upstream, err := rt.Start(context.Background(), ContainerSpec{
+		OrgID:         cfg.App.OrgID,
+		AppName:       cfg.App.Name,
+		ReleaseID:     releaseID,
+		AppDir:        ".",
+		Port:          upstreamPort,
+		CPUMillicores: cfg.Resources.CPUMillicores,
+		MemoryMB:      cfg.Resources.MemoryMB,
+		SQLitePath:    cfg.Storage.SQLitePath,
+	})
+	if err != nil {
+		return nil, err
+	}
 	route, err := d.router.SwapRoute(cfg.App.OrgID, cfg.App.Name, cfg.App.Domain, releaseID, upstream)
 	if err != nil {
+		_ = rt.Stop(context.Background(), cfg.App.OrgID, cfg.App.Name, releaseID)
 		return nil, err
 	}
 	coldStartMs := time.Since(coldStartBegin).Milliseconds()
@@ -257,6 +292,13 @@ func (d *Daemon) SetMaxBudget(orgID, appName string, maxMonthlyUSD float64) (App
 	defer d.mu.Unlock()
 
 	return d.budget.SetMaxBudget(orgID, appName, maxMonthlyUSD)
+}
+
+func (d *Daemon) RolloverAll(now time.Time) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.budget.RolloverAll(now)
 }
 
 func (d *Daemon) Status(orgID, appName string) (AppStatus, error) {

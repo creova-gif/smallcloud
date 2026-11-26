@@ -17,11 +17,18 @@ SmallCloud deploys single-node web applications from a repository to HTTPS in un
 ## Run the CLI
 
 ```bash
+	go run ./cli/cmd/smallcloud init ./my-app
+	go run ./cli/cmd/smallcloud doctor ./templates/fastapi-sqlite
 	go run ./cli/cmd/smallcloud package ./templates/fastapi-sqlite
 	go run ./cli/cmd/smallcloud deploy ./templates/fastapi-sqlite v1.0.0
 	go run ./cli/cmd/smallcloud rollback ./templates/fastapi-sqlite
+	go run ./cli/cmd/smallcloud status ./templates/fastapi-sqlite
+	go run ./cli/cmd/smallcloud budget set ./templates/fastapi-sqlite 10.00
+	go run ./cli/cmd/smallcloud serve --addr 127.0.0.1:7420
 	go run ./cli/cmd/smallcloud eval
 ```
+
+Set `SMALLCLOUD_API_TOKEN` to require `Authorization: Bearer <token>` on `/v1/*` HTTP endpoints (`/healthz` stays open).
 
 ## Benchmark results
 

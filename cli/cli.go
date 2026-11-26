@@ -336,12 +336,29 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|package|deploy|rollback|status|budget|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|serve|eval> [args]")
 	}
 
 	cmd := args[0]
 	if cmd == "init" {
 		return runInit(args[1:], stdout)
+	}
+	if cmd == "doctor" {
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		report, err := RunDoctor(dir, stateDir)
+		if err != nil {
+			return err
+		}
+		if err := writeJSON(stdout, report); err != nil {
+			return err
+		}
+		if !report.Passed {
+			return errors.New("doctor found failing preflight checks")
+		}
+		return nil
 	}
 	if cmd == "serve" {
 		addr := "127.0.0.1:7420"
