@@ -350,3 +350,61 @@ func (m *StorageManager) PruneSnapshots(orgID, appName string, keepLast int) (in
 
 	return pruned, nil
 }
+
+func (m *StorageManager) VerifySnapshot(orgID, appName string) (SnapshotMetadata, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return SnapshotMetadata{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	src := m.replicaPath(orgID, appName)
+
+	expectedBytes, err := os.ReadFile(src + ".sha256")
+	if err != nil {
+		return SnapshotMetadata{}, fmt.Errorf("read replica checksum: %w", err)
+	}
+	expected := strings.TrimSpace(string(expectedBytes))
+	if expected == "" {
+		return SnapshotMetadata{}, errors.New("empty replica sha256 checksum")
+	}
+
+	f, err := os.Open(src)
+	if err != nil {
+		return SnapshotMetadata{}, fmt.Errorf("read replica %q: %w", src, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return SnapshotMetadata{}, fmt.Errorf("stat replica %q: %w", src, err)
+	}
+
+	hasher := sha256.New()
+	sizeBytes, err := io.Copy(hasher, f)
+	if err != nil {
+		return SnapshotMetadata{}, fmt.Errorf("hash replica %q: %w", src, err)
+	}
+	hexSum := hex.EncodeToString(hasher.Sum(nil))
+	if hexSum != expected {
+		return SnapshotMetadata{}, fmt.Errorf("%w: got %s, want %s", ErrChecksumMismatch, hexSum, expected)
+	}
+
+	key := tenantKey(orgID, appName)
+	gen := m.generations[key]
+	if gen == 0 {
+		if existing, err := m.listSnapshotsLocked(orgID, appName); err == nil && len(existing) > 0 {
+			gen = existing[0].Generation
+		}
+	}
+
+	return SnapshotMetadata{
+		OrgID:      orgID,
+		AppName:    appName,
+		Generation: gen,
+		SizeBytes:  sizeBytes,
+		SHA256:     hexSum,
+		SyncedAt:   info.ModTime().UTC(),
+	}, nil
+}

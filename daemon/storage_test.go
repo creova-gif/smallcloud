@@ -240,3 +240,71 @@ func TestStorageManagerListSnapshotsAndPruneSnapshots(t *testing.T) {
 		t.Fatalf("PruneSnapshots idempotent pruned = %d, want 0", prunedAgain)
 	}
 }
+
+func TestStorageManagerVerifySnapshotSuccessAndCorruption(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(filepath.Join(dir, "replicas"))
+
+	if _, err := sm.VerifySnapshot("../etc", "app1"); err == nil {
+		t.Fatal("expected error for invalid orgID in VerifySnapshot")
+	}
+	if _, err := sm.VerifySnapshot("acme", "app1"); err == nil {
+		t.Fatal("expected error when replica and checksum are missing")
+	}
+
+	payload := []byte("sqlite-verify-snapshot-payload")
+	expectedSum := sha256.Sum256(payload)
+	expectedHex := hex.EncodeToString(expectedSum[:])
+
+	srcPath := filepath.Join(dir, "host.db")
+	if err := os.WriteFile(srcPath, payload, 0o600); err != nil {
+		t.Fatalf("write source db: %v", err)
+	}
+
+	syncedMeta, err := sm.SyncWAL("acme", "app1", srcPath)
+	if err != nil {
+		t.Fatalf("SyncWAL: %v", err)
+	}
+
+	verifiedMeta, err := sm.VerifySnapshot("acme", "app1")
+	if err != nil {
+		t.Fatalf("VerifySnapshot: %v", err)
+	}
+	if verifiedMeta.OrgID != "acme" || verifiedMeta.AppName != "app1" {
+		t.Fatalf("unexpected tenant metadata: %+v", verifiedMeta)
+	}
+	if verifiedMeta.Generation != syncedMeta.Generation {
+		t.Fatalf("VerifySnapshot Generation = %d, want %d", verifiedMeta.Generation, syncedMeta.Generation)
+	}
+	if verifiedMeta.SizeBytes != int64(len(payload)) {
+		t.Fatalf("VerifySnapshot SizeBytes = %d, want %d", verifiedMeta.SizeBytes, len(payload))
+	}
+	if verifiedMeta.SHA256 != expectedHex {
+		t.Fatalf("VerifySnapshot SHA256 = %s, want %s", verifiedMeta.SHA256, expectedHex)
+	}
+
+	sidecarPath := sm.replicaPath("acme", "app1") + ".sha256"
+	if err := os.WriteFile(sidecarPath, []byte(strings.Repeat("0", 64)+"\n"), 0o600); err != nil {
+		t.Fatalf("corrupt sidecar: %v", err)
+	}
+	if _, err := sm.VerifySnapshot("acme", "app1"); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("VerifySnapshot corrupted sidecar err = %v, want ErrChecksumMismatch", err)
+	}
+
+	if err := os.WriteFile(sidecarPath, []byte(expectedHex+"\n"), 0o600); err != nil {
+		t.Fatalf("restore sidecar: %v", err)
+	}
+	if err := os.WriteFile(sm.replicaPath("acme", "app1"), []byte("corrupted-bytes"), 0o600); err != nil {
+		t.Fatalf("corrupt replica: %v", err)
+	}
+	if _, err := sm.VerifySnapshot("acme", "app1"); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("VerifySnapshot corrupted replica err = %v, want ErrChecksumMismatch", err)
+	}
+
+	if err := os.Remove(sidecarPath); err != nil {
+		t.Fatalf("remove sidecar: %v", err)
+	}
+	if _, err := sm.VerifySnapshot("acme", "app1"); err == nil {
+		t.Fatal("expected error when checksum sidecar is missing")
+	}
+}

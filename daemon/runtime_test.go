@@ -430,3 +430,102 @@ func TestDockerRuntimeStartSortedEnv(t *testing.T) {
 		t.Fatalf("expected sorted env flags before image arg %v, got %v (full args: %v)", expectedTail, gotTail, runArgs)
 	}
 }
+
+func TestNoopRuntimeLogs(t *testing.T) {
+	var rt ContainerRuntime = NoopRuntime{}
+	ctx := context.Background()
+
+	out, err := rt.Logs(ctx, "acme", "billing", "rel-1", 50)
+	if err != nil {
+		t.Fatalf("NoopRuntime.Logs failed: %v", err)
+	}
+	if out != "" {
+		t.Fatalf("expected empty noop logs, got %q", out)
+	}
+
+	if _, err := rt.Logs(ctx, "INVALID", "billing", "rel-1", 10); err == nil {
+		t.Fatal("expected error for invalid orgID")
+	}
+	if _, err := rt.Logs(ctx, "acme", "../bad", "rel-1", 10); err == nil {
+		t.Fatal("expected error for invalid appName")
+	}
+	if _, err := rt.Logs(ctx, "acme", "billing", "", 10); err == nil {
+		t.Fatal("expected error for empty releaseID")
+	}
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := rt.Logs(canceledCtx, "acme", "billing", "rel-1", 10); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestDockerRuntimeLogs(t *testing.T) {
+	var calls []recordedCommand
+	rt := DockerRuntime{
+		Binary: "podman",
+		CommandRunner: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, recordedCommand{
+				name: name,
+				args: append([]string(nil), args...),
+			})
+			return []byte("line1\nline2\n"), nil
+		},
+	}
+
+	out, err := rt.Logs(context.Background(), "acme", "billing", "rel-42", 0)
+	if err != nil {
+		t.Fatalf("DockerRuntime.Logs default tail failed: %v", err)
+	}
+	if out != "line1\nline2\n" {
+		t.Fatalf("unexpected logs output: %q", out)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(calls))
+	}
+	if calls[0].name != "podman" {
+		t.Fatalf("expected binary podman, got %q", calls[0].name)
+	}
+	wantDefault := []string{"logs", "--tail", "100", "sc-acme-billing-rel-42"}
+	if !slices.Equal(calls[0].args, wantDefault) {
+		t.Fatalf("unexpected default tail args: got %v, want %v", calls[0].args, wantDefault)
+	}
+
+	out, err = rt.Logs(context.Background(), "acme", "billing", "rel-42", 25)
+	if err != nil {
+		t.Fatalf("DockerRuntime.Logs explicit tail failed: %v", err)
+	}
+	if out != "line1\nline2\n" {
+		t.Fatalf("unexpected logs output: %q", out)
+	}
+	wantExplicit := []string{"logs", "--tail", "25", "sc-acme-billing-rel-42"}
+	if !slices.Equal(calls[1].args, wantExplicit) {
+		t.Fatalf("unexpected explicit tail args: got %v, want %v", calls[1].args, wantExplicit)
+	}
+
+	errRT := DockerRuntime{
+		CommandRunner: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+			return []byte("no such container"), errors.New("exit status 1")
+		},
+	}
+	if _, err := errRT.Logs(context.Background(), "acme", "billing", "rel-42", 10); err == nil || !strings.Contains(err.Error(), "docker logs") {
+		t.Fatalf("expected docker logs error, got %v", err)
+	}
+
+	called := false
+	valRT := DockerRuntime{
+		CommandRunner: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+			called = true
+			return nil, nil
+		},
+	}
+	if _, err := valRT.Logs(context.Background(), "BAD", "billing", "rel-1", 10); err == nil {
+		t.Fatal("expected validation error for orgID")
+	}
+	if _, err := valRT.Logs(context.Background(), "acme", "billing", "", 10); err == nil {
+		t.Fatal("expected validation error for releaseID")
+	}
+	if called {
+		t.Fatal("CommandRunner should not be called when validation fails")
+	}
+}

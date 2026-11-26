@@ -386,6 +386,10 @@ func (s *stubContainerRuntime) Stop(_ context.Context, orgID, appName, releaseID
 	return nil
 }
 
+func (s *stubContainerRuntime) Logs(_ context.Context, _, _, _ string, _ int) (string, error) {
+	return "", nil
+}
+
 func TestDaemonContainerRuntimeWiringAndRolloverAll(t *testing.T) {
 	d := NewDaemon(t.TempDir(), t.TempDir())
 	if _, ok := d.Runtime().(NoopRuntime); !ok {

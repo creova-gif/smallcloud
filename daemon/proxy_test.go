@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -121,5 +122,125 @@ func TestRenderCaddyfileHaltedIncludesRetryAfter(t *testing.T) {
 	}
 	if !strings.Contains(out, `respond "402 Payment Required: SmallCloud monthly spend cap reached" 402`) {
 		t.Fatalf("expected 402 respond directive in halted Caddyfile, got:\n%s", out)
+	}
+}
+
+type stubApplier struct {
+	err       error
+	lastCfg   string
+	applyCall int
+}
+
+func (s *stubApplier) ApplyConfig(_, caddyfile string) error {
+	s.applyCall++
+	s.lastCfg = caddyfile
+	return s.err
+}
+
+func TestCaddyRouterSetCanaryWeightValidation(t *testing.T) {
+	router := NewCaddyRouter()
+
+	if _, err := router.SetCanaryWeight("acme", "api", -1); err == nil {
+		t.Fatal("expected error for negative canary weight")
+	}
+	if _, err := router.SetCanaryWeight("acme", "api", 101); err == nil {
+		t.Fatal("expected error for canary weight > 100")
+	}
+	if _, err := router.SetCanaryWeight("acme", "api", 20); !errors.Is(err, ErrNoRouteFound) {
+		t.Fatalf("expected ErrNoRouteFound for missing route, got %v", err)
+	}
+
+	if _, err := router.SwapRoute("acme", "api", "api.acme.example", "v1", "127.0.0.1:9001"); err != nil {
+		t.Fatalf("SwapRoute v1 failed: %v", err)
+	}
+	if _, err := router.SetCanaryWeight("acme", "api", 25); err == nil {
+		t.Fatal("expected error when standby upstream is missing")
+	}
+}
+
+func TestRenderCaddyfileCanaryWeight(t *testing.T) {
+	base := RouteEntry{
+		Domain:          "api.acme.example",
+		ActiveUpstream:  "127.0.0.1:9002",
+		StandbyUpstream: "127.0.0.1:9001",
+		CanaryWeight:    0,
+	}
+	singleOut := RenderCaddyfile(base, "")
+	if strings.Contains(singleOut, "weighted_round_robin") {
+		t.Fatalf("expected no weighted_round_robin when CanaryWeight == 0, got:\n%s", singleOut)
+	}
+	if !strings.Contains(singleOut, "reverse_proxy 127.0.0.1:9002 {") {
+		t.Fatalf("expected single-upstream reverse_proxy, got:\n%s", singleOut)
+	}
+
+	weighted := base
+	weighted.CanaryWeight = 20
+	weightedOut := RenderCaddyfile(weighted, "/readyz")
+	if !strings.Contains(weightedOut, "reverse_proxy 127.0.0.1:9002 127.0.0.1:9001 {") {
+		t.Fatalf("expected dual-upstream reverse_proxy, got:\n%s", weightedOut)
+	}
+	if !strings.Contains(weightedOut, "lb_policy weighted_round_robin 80 20") {
+		t.Fatalf("expected weighted_round_robin 80 20, got:\n%s", weightedOut)
+	}
+	if !strings.Contains(weightedOut, "health_uri /readyz") {
+		t.Fatalf("expected health_uri /readyz, got:\n%s", weightedOut)
+	}
+	if !strings.Contains(weightedOut, "health_interval 5s") {
+		t.Fatalf("expected health_interval 5s, got:\n%s", weightedOut)
+	}
+}
+
+func TestCaddyRouterSetCanaryWeightApplierRollbackAndReset(t *testing.T) {
+	applier := &stubApplier{}
+	router := NewCaddyRouterWithApplier(applier)
+
+	if _, err := router.SwapRoute("acme", "api", "api.acme.example", "v1", "127.0.0.1:9001"); err != nil {
+		t.Fatalf("SwapRoute v1 failed: %v", err)
+	}
+	if _, err := router.SwapRoute("acme", "api", "api.acme.example", "v2", "127.0.0.1:9002"); err != nil {
+		t.Fatalf("SwapRoute v2 failed: %v", err)
+	}
+
+	updated, err := router.SetCanaryWeight("acme", "api", 30)
+	if err != nil {
+		t.Fatalf("SetCanaryWeight(30) failed: %v", err)
+	}
+	if updated.CanaryWeight != 30 {
+		t.Fatalf("expected CanaryWeight 30, got %d", updated.CanaryWeight)
+	}
+	if !strings.Contains(applier.lastCfg, "lb_policy weighted_round_robin 70 30") {
+		t.Fatalf("expected applied config to contain weighted_round_robin 70 30, got:\n%s", applier.lastCfg)
+	}
+
+	applier.err = errors.New("caddy reload failed")
+	if _, err := router.SetCanaryWeight("acme", "api", 50); err == nil {
+		t.Fatal("expected SetCanaryWeight to return applier error")
+	}
+	got, ok := router.GetRoute("acme", "api")
+	if !ok {
+		t.Fatal("expected route to exist")
+	}
+	if got.CanaryWeight != 30 {
+		t.Fatalf("expected CanaryWeight rolled back to 30, got %d", got.CanaryWeight)
+	}
+
+	applier.err = nil
+	swapped, err := router.SwapRoute("acme", "api", "api.acme.example", "v3", "127.0.0.1:9003")
+	if err != nil {
+		t.Fatalf("SwapRoute v3 failed: %v", err)
+	}
+	if swapped.CanaryWeight != 0 {
+		t.Fatalf("expected CanaryWeight reset to 0 on SwapRoute, got %d", swapped.CanaryWeight)
+	}
+
+	if _, err := router.SetCanaryWeight("acme", "api", 15); err != nil {
+		t.Fatalf("SetCanaryWeight(15) failed: %v", err)
+	}
+	rolled, err := router.Rollback("acme", "api")
+	if err != nil {
+		t.Fatalf("Rollback failed: %v", err)
+	}
+	if rolled.CanaryWeight != 0 {
+		t.Fatalf("expected CanaryWeight reset to 0 on Rollback, got %d", rolled.CanaryWeight)
 	}
 }

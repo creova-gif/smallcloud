@@ -453,7 +453,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|meter|rollover|list|destroy|events|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|meter|rollover|list|destroy|events|logs|canary|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -462,10 +462,40 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	}
 	if cmd == "doctor" {
 		dir := "."
-		if len(args) > 1 {
-			dir = args[1]
+		live := false
+		var caddyURL, daemonURL string
+		for i := 1; i < len(args); i++ {
+			a := args[i]
+			switch {
+			case a == "--live":
+				live = true
+			case a == "--caddy" && i+1 < len(args):
+				caddyURL = args[i+1]
+				i++
+			case strings.HasPrefix(a, "--caddy="):
+				caddyURL = strings.TrimPrefix(a, "--caddy=")
+			case a == "--daemon" && i+1 < len(args):
+				daemonURL = args[i+1]
+				i++
+			case strings.HasPrefix(a, "--daemon="):
+				daemonURL = strings.TrimPrefix(a, "--daemon=")
+			case !strings.HasPrefix(a, "-"):
+				dir = a
+			}
 		}
-		report, err := RunDoctor(dir, stateDir)
+		var report *DoctorReport
+		var err error
+		if live {
+			if caddyURL == "" {
+				caddyURL = strings.TrimSpace(os.Getenv("SMALLCLOUD_CADDY_ADMIN_URL"))
+			}
+			if daemonURL == "" {
+				daemonURL = strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL"))
+			}
+			report, err = RunDoctorLive(dir, stateDir, caddyURL, daemonURL)
+		} else {
+			report, err = RunDoctor(dir, stateDir)
+		}
 		if err != nil {
 			return err
 		}
@@ -675,6 +705,64 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			return writeJSON(stdout, map[string]any{"events": events})
 		}
 		return writeJSON(stdout, map[string]any{"events": d.Audit().List(orgID, appName, 50)})
+
+	case "logs":
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		releaseID := ""
+		if len(args) > 2 {
+			releaseID = args[2]
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		if releaseID == "" {
+			st, err := d.Status(cfg.App.OrgID, cfg.App.Name)
+			if err != nil {
+				return err
+			}
+			releaseID = st.Route.ActiveReleaseID
+		}
+		logs, err := d.Runtime().Logs(context.Background(), cfg.App.OrgID, cfg.App.Name, releaseID, 100)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]string{
+			"org_id":     cfg.App.OrgID,
+			"app_name":   cfg.App.Name,
+			"release_id": releaseID,
+			"logs":       logs,
+		})
+
+	case "canary":
+		if len(args) < 2 {
+			return errors.New("usage: smallcloud canary [dir] <standby_pct>")
+		}
+		dir := "."
+		rawPct := args[1]
+		if len(args) >= 3 {
+			dir = args[1]
+			rawPct = args[2]
+		}
+		pct, err := strconv.Atoi(rawPct)
+		if err != nil {
+			return fmt.Errorf("invalid standby_pct %q: %w", rawPct, err)
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		route, err := d.Router().SetCanaryWeight(cfg.App.OrgID, cfg.App.Name, pct)
+		if err != nil {
+			return err
+		}
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, route)
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)

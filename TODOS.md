@@ -7,7 +7,12 @@
 - [x] **TODO-4: Signed Budget Webhooks** — Deliver HMAC-SHA256 signed webhook payloads when apps cross `alert_at_pct` or trigger `hard_stop`.
 - [x] **TODO-5: Local Snapshot Pruning** — Add retention policies and automated pruning for historical local WAL snapshots.
 
-## Planned (Wave 6)
-- [ ] **TODO-6: Org-Level Aggregate Quotas** — Enforce org-level aggregate spend quotas with soft/hard rollup across apps.
-- [ ] **TODO-7: Release Artifact Signing** — Sign release artifacts and generate checksum attestations.
-- [ ] **TODO-8: Canary Traffic Weighting** — Support weighted traffic splitting (`X%` Blue / `Y%` Green) during deployments.
+## Completed (Wave 6)
+- [x] **TODO-6: Org-Level Aggregate Quotas** — Enforce org-level aggregate spend quotas with soft/hard rollup across apps.
+- [x] **TODO-7: Release Artifact Signing** — Sign release artifacts and generate checksum attestations.
+- [x] **TODO-8: Canary Traffic Weighting** — Support weighted traffic splitting (`X%` Blue / `Y%` Green) during deployments.
+
+## Planned (Wave 7)
+- [ ] **TODO-9: Multi-Region SQLite Read Replicas** — Stream Litestream WAL snapshots to read-only edge replicas with sub-second lag bounds.
+- [ ] **TODO-10: WireGuard Mesh Control-Plane Tunneling** — Establish encrypted peer-to-peer tunnels between control-plane daemon and remote worker nodes.
+- [ ] **TODO-11: GitHub Webhook Git-Push Deployments** — Trigger verified build-and-deploy pipelines from signed GitHub push webhooks with automated canary rollback.

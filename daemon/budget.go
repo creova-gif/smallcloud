@@ -10,7 +10,19 @@ import (
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
 
-var ErrBudgetExceeded = errors.New("monthly spend cap reached: circuit breaker tripped")
+var (
+	ErrBudgetExceeded   = errors.New("monthly spend cap reached: circuit breaker tripped")
+	ErrOrgQuotaExceeded = fmt.Errorf("org quota exceeded: %w", ErrBudgetExceeded)
+)
+
+type OrgSpendSummary struct {
+	OrgID         string  `json:"org_id"`
+	TotalSpendUSD float64 `json:"total_spend_usd"`
+	MaxMonthlyUSD float64 `json:"max_monthly_usd"`
+	AppCount      int     `json:"app_count"`
+	HaltedApps    int     `json:"halted_apps"`
+	Exceeded      bool    `json:"exceeded"`
+}
 
 type BudgetStatus string
 
@@ -50,11 +62,12 @@ type AppBudgetState struct {
 }
 
 type BudgetTracker struct {
-	mu       sync.RWMutex
-	states   map[string]*AppBudgetState
-	onHalt   func(orgID, appName string)
-	onUnhalt func(orgID, appName string)
-	onAlert  func(orgID, appName string, state AppBudgetState)
+	mu        sync.RWMutex
+	states    map[string]*AppBudgetState
+	orgQuotas map[string]float64
+	onHalt    func(orgID, appName string)
+	onUnhalt  func(orgID, appName string)
+	onAlert   func(orgID, appName string, state AppBudgetState)
 }
 
 func NewBudgetTracker(onHalt func(orgID, appName string)) *BudgetTracker {
@@ -63,9 +76,10 @@ func NewBudgetTracker(onHalt func(orgID, appName string)) *BudgetTracker {
 
 func NewBudgetTrackerWithCallbacks(onHalt, onUnhalt func(orgID, appName string)) *BudgetTracker {
 	return &BudgetTracker{
-		states:   make(map[string]*AppBudgetState),
-		onHalt:   onHalt,
-		onUnhalt: onUnhalt,
+		states:    make(map[string]*AppBudgetState),
+		orgQuotas: make(map[string]float64),
+		onHalt:    onHalt,
+		onUnhalt:  onUnhalt,
 	}
 }
 
@@ -203,6 +217,12 @@ func (b *BudgetTracker) RecordSpend(orgID, appName string, deltaUSD float64) (Ap
 	snapshot := cloneBudgetState(st)
 	shouldCallHalt := !wasHalted && st.Halted && b.onHalt != nil
 	shouldAlert := !wasAlertSent && st.AlertSent && b.onAlert != nil
+	orgExceeded := false
+	if quota, ok := b.orgQuotas[orgID]; ok && quota > 0 {
+		if b.orgSpendLocked(orgID) >= quota {
+			orgExceeded = true
+		}
+	}
 	b.mu.Unlock()
 
 	if shouldCallHalt {
@@ -214,6 +234,9 @@ func (b *BudgetTracker) RecordSpend(orgID, appName string, deltaUSD float64) (Ap
 
 	if snapshot.Halted {
 		return snapshot, ErrBudgetExceeded
+	}
+	if orgExceeded {
+		return snapshot, ErrOrgQuotaExceeded
 	}
 	return snapshot, nil
 }
@@ -307,7 +330,74 @@ func (b *BudgetTracker) CheckAllowed(orgID, appName string) error {
 	if st.Halted {
 		return ErrBudgetExceeded
 	}
+	if quota, ok := b.orgQuotas[orgID]; ok && quota > 0 {
+		if b.orgSpendLocked(orgID) >= quota {
+			return ErrOrgQuotaExceeded
+		}
+	}
 	return nil
+}
+
+func (b *BudgetTracker) SetOrgQuota(orgID string, maxMonthlyUSD float64) error {
+	if orgID == "" {
+		return errors.New("org_id must be non-empty")
+	}
+	if math.IsNaN(maxMonthlyUSD) || math.IsInf(maxMonthlyUSD, 0) || maxMonthlyUSD <= 0 {
+		return errors.New("max_monthly_usd must be a finite positive number")
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.orgQuotas == nil {
+		b.orgQuotas = make(map[string]float64)
+	}
+	b.orgQuotas[orgID] = maxMonthlyUSD
+	return nil
+}
+
+func (b *BudgetTracker) OrgQuota(orgID string) (float64, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	q, ok := b.orgQuotas[orgID]
+	return q, ok
+}
+
+func (b *BudgetTracker) OrgSummary(orgID string) OrgSpendSummary {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	var totalSpend float64
+	var appCount int
+	var haltedApps int
+	for _, st := range b.states {
+		if st.OrgID != orgID {
+			continue
+		}
+		appCount++
+		totalSpend += st.CurrentUSD
+		if st.Halted {
+			haltedApps++
+		}
+	}
+	quota, hasQuota := b.orgQuotas[orgID]
+	return OrgSpendSummary{
+		OrgID:         orgID,
+		TotalSpendUSD: totalSpend,
+		MaxMonthlyUSD: quota,
+		AppCount:      appCount,
+		HaltedApps:    haltedApps,
+		Exceeded:      hasQuota && quota > 0 && totalSpend >= quota,
+	}
+}
+
+func (b *BudgetTracker) orgSpendLocked(orgID string) float64 {
+	var total float64
+	for _, st := range b.states {
+		if st.OrgID == orgID {
+			total += st.CurrentUSD
+		}
+	}
+	return total
 }
 
 func (b *BudgetTracker) State(orgID, appName string) (AppBudgetState, bool) {

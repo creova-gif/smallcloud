@@ -30,6 +30,7 @@ type ContainerSpec struct {
 type ContainerRuntime interface {
 	Start(ctx context.Context, spec ContainerSpec) (upstream string, err error)
 	Stop(ctx context.Context, orgID, appName, releaseID string) error
+	Logs(ctx context.Context, orgID, appName, releaseID string, tail int) (string, error)
 }
 
 type NoopRuntime struct{}
@@ -59,6 +60,21 @@ func (NoopRuntime) Stop(ctx context.Context, orgID, appName, releaseID string) e
 		return err
 	}
 	return nil
+}
+
+func (NoopRuntime) Logs(ctx context.Context, orgID, appName, releaseID string, tail int) (string, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return "", err
+	}
+	if err := validateReleaseID(releaseID); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 type DockerRuntime struct {
@@ -207,4 +223,29 @@ func (r DockerRuntime) Stop(ctx context.Context, orgID, appName, releaseID strin
 		return fmt.Errorf("docker rm %q: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func (r DockerRuntime) Logs(ctx context.Context, orgID, appName, releaseID string, tail int) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return "", err
+	}
+	if err := validateReleaseID(releaseID); err != nil {
+		return "", err
+	}
+	if tail <= 0 {
+		tail = 100
+	}
+
+	name := containerName(orgID, appName, releaseID)
+	out, err := r.runCmd(ctx, "logs", "--tail", strconv.Itoa(tail), name)
+	if err != nil {
+		return "", fmt.Errorf("docker logs %q: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
 }

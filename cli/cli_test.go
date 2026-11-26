@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -492,5 +493,129 @@ func TestCLIServeBackgroundRolloverAndShutdown(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "state.json")); err != nil {
 		t.Fatalf("expected state.json persisted on shutdown: %v", err)
+	}
+}
+
+func TestCLIDoctorLive(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/config/" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{}"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer caddySrv.Close()
+
+	daemonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer daemonSrv.Close()
+
+	var flagOut bytes.Buffer
+	if err := Run([]string{"doctor", "--live", "--caddy", caddySrv.URL, "--daemon", daemonSrv.URL, templateDir}, stateDir, &flagOut); err != nil {
+		t.Fatalf("doctor --live with flags failed: %v", err)
+	}
+	var flagReport DoctorReport
+	if err := json.Unmarshal(flagOut.Bytes(), &flagReport); err != nil {
+		t.Fatalf("unmarshal doctor --live report: %v", err)
+	}
+	if !flagReport.Passed {
+		t.Fatalf("expected doctor --live Passed=true, got %+v", flagReport)
+	}
+
+	t.Setenv("SMALLCLOUD_CADDY_ADMIN_URL", caddySrv.URL)
+	t.Setenv("SMALLCLOUD_DAEMON_URL", daemonSrv.URL)
+
+	var envOut bytes.Buffer
+	if err := Run([]string{"doctor", "--live", templateDir}, stateDir, &envOut); err != nil {
+		t.Fatalf("doctor --live with env fallback failed: %v", err)
+	}
+	var envReport DoctorReport
+	if err := json.Unmarshal(envOut.Bytes(), &envReport); err != nil {
+		t.Fatalf("unmarshal doctor --live env report: %v", err)
+	}
+	if !envReport.Passed {
+		t.Fatalf("expected doctor --live env Passed=true, got %+v", envReport)
+	}
+
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer failSrv.Close()
+
+	var failOut bytes.Buffer
+	if err := Run([]string{"doctor", "--live", "--caddy", failSrv.URL, templateDir}, stateDir, &failOut); err == nil {
+		t.Fatal("expected doctor --live with failing caddy to return error")
+	}
+}
+
+func TestCLILogsAndCanary(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, stateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("deploy v1.0.0 failed: %v", err)
+	}
+	if err := Run([]string{"deploy", templateDir, "v1.1.0"}, stateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("deploy v1.1.0 failed: %v", err)
+	}
+
+	var logsActiveOut bytes.Buffer
+	if err := Run([]string{"logs", templateDir}, stateDir, &logsActiveOut); err != nil {
+		t.Fatalf("cli logs (active) failed: %v", err)
+	}
+	var logsActive struct {
+		OrgID     string `json:"org_id"`
+		AppName   string `json:"app_name"`
+		ReleaseID string `json:"release_id"`
+		Logs      string `json:"logs"`
+	}
+	if err := json.Unmarshal(logsActiveOut.Bytes(), &logsActive); err != nil {
+		t.Fatalf("unmarshal logs output: %v", err)
+	}
+	if logsActive.OrgID != "org-indie-default" || logsActive.AppName != "fastapi-starter" || logsActive.ReleaseID != "v1.1.0" {
+		t.Fatalf("unexpected logs output: %+v", logsActive)
+	}
+
+	var logsExplicitOut bytes.Buffer
+	if err := Run([]string{"logs", templateDir, "v1.0.0"}, stateDir, &logsExplicitOut); err != nil {
+		t.Fatalf("cli logs (explicit) failed: %v", err)
+	}
+	var logsExplicit struct {
+		ReleaseID string `json:"release_id"`
+	}
+	if err := json.Unmarshal(logsExplicitOut.Bytes(), &logsExplicit); err != nil {
+		t.Fatalf("unmarshal explicit logs output: %v", err)
+	}
+	if logsExplicit.ReleaseID != "v1.0.0" {
+		t.Fatalf("expected release_id v1.0.0, got %q", logsExplicit.ReleaseID)
+	}
+
+	var canaryOut bytes.Buffer
+	if err := Run([]string{"canary", templateDir, "25"}, stateDir, &canaryOut); err != nil {
+		t.Fatalf("cli canary failed: %v", err)
+	}
+	var route daemon.RouteEntry
+	if err := json.Unmarshal(canaryOut.Bytes(), &route); err != nil {
+		t.Fatalf("unmarshal canary output: %v", err)
+	}
+	if route.ActiveReleaseID != "v1.1.0" || route.StandbyReleaseID != "v1.0.0" {
+		t.Fatalf("unexpected canary route: %+v", route)
+	}
+
+	if err := Run([]string{"canary"}, stateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary with missing args to fail")
+	}
+	if err := Run([]string{"canary", templateDir, "not-a-number"}, stateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary with invalid pct to fail")
 	}
 }

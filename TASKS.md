@@ -25,13 +25,20 @@
 ## Wave 5: Full Product Engineering & Scope Expansion
 - [x] Embedded Operator Web UI (lightweight single-binary dashboard for deployments, budgets, and logs)
 - [x] Signed Budget/Alert Webhooks (HMAC-SHA256 signed webhook delivery on budget thresholds and hard-stop events)
-- [ ] Live `doctor --live` TLS & Caddy Admin Probe (active Caddy admin API and TLS certificate verification)
+- [x] Live `doctor --live` TLS & Caddy Admin Probe (active Caddy admin API and TLS certificate verification)
 - [x] Automated Snapshot Pruning & S3/GCS Backup Lifecycle (retention policies and scheduled object-store pruning)
 - [ ] Multi-Node Worker Pool / Edge Routing (multi-host scheduling and edge proxy route synchronization)
 
 ## Wave 6: Enterprise Control Plane, Multi-Tenant Quotas & Release Lifecycle
-- [ ] Org-Level Aggregate Spend Quotas & Soft/Hard Rollup
-- [ ] Release Artifact Signing & Checksum Attestation
-- [ ] Streaming Container Logs (`smallcloud logs`)
-- [ ] Canary Traffic Weighting (`X%` Blue / `Y%` Green)
+- [x] Org-Level Aggregate Spend Quotas & Soft/Hard Rollup
+- [x] Release Artifact Signing & Checksum Attestation
+- [x] Streaming Container Logs (`smallcloud logs`)
+- [x] Canary Traffic Weighting (`X%` Blue / `Y%` Green)
 - [ ] Multi-Node Worker Pool & Edge Route Sync
+
+## Wave 7: Distributed Edge, Zero-Trust Mesh & Developer Platform
+- [ ] Multi-Region SQLite Read Replicas
+- [ ] WireGuard Mesh Control-Plane Tunneling
+- [ ] GitHub Webhook Git-Push Deployments
+- [ ] Interactive App Scaffolding & Plugin Templates
+- [ ] Automated Chaos & Canary Auto-Rollback

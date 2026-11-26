@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -258,5 +260,124 @@ func TestBudgetAlertCallbackFiresOnceAndResetsOnRollover(t *testing.T) {
 	}
 	if alerts[1].CurrentUSD != 9.0 || !alerts[1].AlertSent {
 		t.Fatalf("unexpected second alert state: %+v", alerts[1])
+	}
+}
+
+func TestBudgetSetOrgQuotaValidation(t *testing.T) {
+	bt := NewBudgetTracker(nil)
+
+	if err := bt.SetOrgQuota("", 10.0); err == nil {
+		t.Fatalf("expected error for empty orgID")
+	}
+	if err := bt.SetOrgQuota("org-alpha", 0); err == nil {
+		t.Fatalf("expected error for zero quota")
+	}
+	if err := bt.SetOrgQuota("org-alpha", -5.0); err == nil {
+		t.Fatalf("expected error for negative quota")
+	}
+	if err := bt.SetOrgQuota("org-alpha", math.NaN()); err == nil {
+		t.Fatalf("expected error for NaN quota")
+	}
+	if err := bt.SetOrgQuota("org-alpha", math.Inf(1)); err == nil {
+		t.Fatalf("expected error for Inf quota")
+	}
+
+	if _, ok := bt.OrgQuota("org-alpha"); ok {
+		t.Fatalf("expected OrgQuota to return false when unset")
+	}
+
+	if err := bt.SetOrgQuota("org-alpha", 25.0); err != nil {
+		t.Fatalf("SetOrgQuota failed: %v", err)
+	}
+	q, ok := bt.OrgQuota("org-alpha")
+	if !ok || q != 25.0 {
+		t.Fatalf("expected OrgQuota (25.0, true), got (%v, %v)", q, ok)
+	}
+}
+
+func TestBudgetOrgQuotaEnforcementAndSummary(t *testing.T) {
+	bt := NewBudgetTracker(nil)
+	if err := bt.SetOrgQuota("org-alpha", 15.0); err != nil {
+		t.Fatalf("SetOrgQuota failed: %v", err)
+	}
+	if err := bt.RegisterApp("org-alpha", "app-one", 10.0, 80.0); err != nil {
+		t.Fatalf("RegisterApp app-one failed: %v", err)
+	}
+	if err := bt.RegisterApp("org-alpha", "app-two", 10.0, 80.0); err != nil {
+		t.Fatalf("RegisterApp app-two failed: %v", err)
+	}
+	if err := bt.RegisterApp("org-beta", "app-other", 10.0, 80.0); err != nil {
+		t.Fatalf("RegisterApp app-other failed: %v", err)
+	}
+
+	if _, err := bt.RecordSpend("org-alpha", "app-one", 8.0); err != nil {
+		t.Fatalf("RecordSpend app-one failed: %v", err)
+	}
+	if err := bt.CheckAllowed("org-alpha", "app-two"); err != nil {
+		t.Fatalf("expected app-two allowed before quota exceeded, got %v", err)
+	}
+
+	summary := bt.OrgSummary("org-alpha")
+	if summary.OrgID != "org-alpha" || summary.TotalSpendUSD != 8.0 || summary.MaxMonthlyUSD != 15.0 || summary.AppCount != 2 || summary.HaltedApps != 0 || summary.Exceeded {
+		t.Fatalf("unexpected OrgSummary before exceeding: %+v", summary)
+	}
+
+	_, err := bt.RecordSpend("org-alpha", "app-two", 7.0)
+	if !errors.Is(err, ErrOrgQuotaExceeded) {
+		t.Fatalf("expected ErrOrgQuotaExceeded, got %v", err)
+	}
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected errors.Is(err, ErrBudgetExceeded) to be true for %v", err)
+	}
+
+	if err := bt.CheckAllowed("org-alpha", "app-one"); !errors.Is(err, ErrOrgQuotaExceeded) {
+		t.Fatalf("expected CheckAllowed app-one ErrOrgQuotaExceeded, got %v", err)
+	}
+	if err := bt.CheckAllowed("org-alpha", "app-two"); !errors.Is(err, ErrOrgQuotaExceeded) {
+		t.Fatalf("expected CheckAllowed app-two ErrOrgQuotaExceeded, got %v", err)
+	}
+	if err := bt.CheckAllowed("org-beta", "app-other"); err != nil {
+		t.Fatalf("expected org-beta unaffected, got %v", err)
+	}
+
+	summary = bt.OrgSummary("org-alpha")
+	if summary.TotalSpendUSD != 15.0 || summary.MaxMonthlyUSD != 15.0 || summary.AppCount != 2 || summary.HaltedApps != 0 || !summary.Exceeded {
+		t.Fatalf("unexpected OrgSummary after exceeding: %+v", summary)
+	}
+}
+
+func TestBudgetOrgQuotaResetOnRolloverAll(t *testing.T) {
+	bt := NewBudgetTracker(nil)
+	if err := bt.SetOrgQuota("org-alpha", 15.0); err != nil {
+		t.Fatalf("SetOrgQuota failed: %v", err)
+	}
+	if err := bt.RegisterApp("org-alpha", "app-one", 10.0, 80.0); err != nil {
+		t.Fatalf("RegisterApp app-one failed: %v", err)
+	}
+	if err := bt.RegisterApp("org-alpha", "app-two", 10.0, 80.0); err != nil {
+		t.Fatalf("RegisterApp app-two failed: %v", err)
+	}
+
+	if _, err := bt.RecordSpend("org-alpha", "app-one", 9.0); err != nil {
+		t.Fatalf("RecordSpend app-one failed: %v", err)
+	}
+	if _, err := bt.RecordSpend("org-alpha", "app-two", 6.0); !errors.Is(err, ErrOrgQuotaExceeded) {
+		t.Fatalf("expected ErrOrgQuotaExceeded, got %v", err)
+	}
+
+	nextMonth := time.Date(2099, 12, 1, 0, 0, 0, 0, time.UTC)
+	if count := bt.RolloverAll(nextMonth); count != 2 {
+		t.Fatalf("expected 2 apps rolled over, got %d", count)
+	}
+
+	summary := bt.OrgSummary("org-alpha")
+	if summary.TotalSpendUSD != 0 || summary.Exceeded || summary.HaltedApps != 0 {
+		t.Fatalf("expected org spend reset after RolloverAll, got %+v", summary)
+	}
+	if err := bt.CheckAllowed("org-alpha", "app-one"); err != nil {
+		t.Fatalf("expected app-one allowed after rollover, got %v", err)
+	}
+	if err := bt.CheckAllowed("org-alpha", "app-two"); err != nil {
+		t.Fatalf("expected app-two allowed after rollover, got %v", err)
 	}
 }

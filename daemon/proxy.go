@@ -78,6 +78,7 @@ type RouteEntry struct {
 	StandbyColor     ReleaseColor    `json:"standby_color"`
 	StandbyReleaseID string          `json:"standby_release_id"`
 	StandbyUpstream  string          `json:"standby_upstream"`
+	CanaryWeight     int             `json:"canary_weight,omitempty"`
 	Halted           bool            `json:"halted"`
 	UpdatedAt        time.Time       `json:"updated_at"`
 	History          []ReleaseRecord `json:"history,omitempty"`
@@ -185,6 +186,7 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 			StandbyColor:     curr.ActiveColor,
 			StandbyReleaseID: curr.ActiveReleaseID,
 			StandbyUpstream:  curr.ActiveUpstream,
+			CanaryWeight:     0,
 			Halted:           false,
 			UpdatedAt:        now,
 			History: appendReleaseHistory(curr.History, ReleaseRecord{
@@ -239,6 +241,7 @@ func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
 	next.ActiveColor, next.StandbyColor = curr.StandbyColor, curr.ActiveColor
 	next.ActiveReleaseID, next.StandbyReleaseID = curr.StandbyReleaseID, curr.ActiveReleaseID
 	next.ActiveUpstream, next.StandbyUpstream = curr.StandbyUpstream, curr.ActiveUpstream
+	next.CanaryWeight = 0
 	next.UpdatedAt = now
 	next.History = appendReleaseHistory(curr.History, ReleaseRecord{
 		ReleaseID:  next.ActiveReleaseID,
@@ -254,6 +257,38 @@ func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
 
 	r.routes[key] = &next
 	return cloneRouteEntry(next), nil
+}
+
+func (r *CaddyRouter) SetCanaryWeight(orgID, appName string, standbyPct int) (RouteEntry, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return RouteEntry{}, err
+	}
+	if standbyPct < 0 || standbyPct > 100 {
+		return RouteEntry{}, errors.New("canary weight must be between 0 and 100")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := tenantKey(orgID, appName)
+	curr, exists := r.routes[key]
+	if !exists {
+		return RouteEntry{}, fmt.Errorf("%w for %s/%s", ErrNoRouteFound, orgID, appName)
+	}
+	if standbyPct > 0 && curr.StandbyUpstream == "" {
+		return RouteEntry{}, errors.New("no standby upstream available for canary routing")
+	}
+
+	prevCopy := *curr
+	curr.CanaryWeight = standbyPct
+	curr.UpdatedAt = time.Now().UTC()
+
+	if err := r.applier.ApplyConfig(curr.Domain, RenderCaddyfile(*curr, "")); err != nil {
+		*curr = prevCopy
+		return RouteEntry{}, err
+	}
+
+	return cloneRouteEntry(*curr), nil
 }
 
 func (r *CaddyRouter) HaltRoute(orgID, appName string) {
@@ -340,6 +375,19 @@ func RenderCaddyfile(entry RouteEntry, healthPath string) string {
 	}
 	if healthPath == "" {
 		healthPath = "/healthz"
+	}
+	if entry.CanaryWeight > 0 && entry.StandbyUpstream != "" {
+		activeWeight := 100 - entry.CanaryWeight
+		return fmt.Sprintf(`%s {
+	encode zstd gzip
+	reverse_proxy %s %s {
+		lb_policy weighted_round_robin %d %d
+		health_uri %s
+		health_interval 5s
+		lb_try_duration 2s
+	}
+}
+`, entry.Domain, entry.ActiveUpstream, entry.StandbyUpstream, activeWeight, entry.CanaryWeight, healthPath)
 	}
 	return fmt.Sprintf(`%s {
 	encode zstd gzip
