@@ -567,7 +567,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune" || cmd == "backup" || cmd == "nodes") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune" || cmd == "backup" || cmd == "restore-bundle" || cmd == "nodes") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -956,6 +956,13 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	case "restore-bundle":
 		if len(args) < 2 {
 			return errors.New("usage: smallcloud restore-bundle <bundle.tar.gz>")
+		}
+		if client != nil {
+			manifest, err := client.RestoreBackup(context.Background(), args[1])
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, manifest)
 		}
 		manifest, err := daemon.RestoreBackupBundle(d, args[1])
 		if err != nil {

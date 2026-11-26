@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -411,5 +412,77 @@ func TestDaemonClientDownloadBackup(t *testing.T) {
 	}
 	if _, statErr := os.Stat(unauthPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no file written on error, got %v", statErr)
+	}
+}
+
+func TestDaemonClientRestoreBackup(t *testing.T) {
+	payload := []byte("fake-gzip-restore-archive-bytes")
+	bundlePath := filepath.Join(t.TempDir(), "restore.tar.gz")
+	if err := os.WriteFile(bundlePath, payload, 0o600); err != nil {
+		t.Fatalf("write bundle file: %v", err)
+	}
+
+	wantManifest := daemon.BackupManifest{
+		Version:   "1",
+		CreatedAt: time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC),
+		OrgID:     "org-alpha",
+		AppName:   "micro-crm",
+		Snapshot: &daemon.SnapshotMetadata{
+			OrgID:      "org-alpha",
+			AppName:    "micro-crm",
+			Generation: 2,
+			SizeBytes:  128,
+			SHA256:     "abc123",
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/restore" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Content-Type") != "application/gzip" {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			_, _ = w.Write([]byte(`{"error":"expected application/gzip"}`))
+			return
+		}
+		gotBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if string(gotBody) != string(payload) {
+			t.Fatalf("uploaded bundle mismatch: got %q, want %q", gotBody, payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(wantManifest)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	gotManifest, err := client.RestoreBackup(ctx, bundlePath)
+	if err != nil {
+		t.Fatalf("RestoreBackup failed: %v", err)
+	}
+	if gotManifest.OrgID != wantManifest.OrgID || gotManifest.AppName != wantManifest.AppName {
+		t.Fatalf("unexpected manifest tenant: %+v", gotManifest)
+	}
+	if gotManifest.Snapshot == nil || gotManifest.Snapshot.SHA256 != wantManifest.Snapshot.SHA256 {
+		t.Fatalf("unexpected manifest snapshot: %+v", gotManifest.Snapshot)
+	}
+
+	unauthClient := NewDaemonClient(srv.URL, "wrong-tok")
+	if _, err := unauthClient.RestoreBackup(ctx, bundlePath); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error, got %v", err)
+	}
+
+	if _, err := client.RestoreBackup(ctx, filepath.Join(t.TempDir(), "missing.tar.gz")); err == nil {
+		t.Fatal("expected error for missing bundle file")
 	}
 }

@@ -92,6 +92,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("POST /v1/nodes/heartbeat", d.handleNodeHeartbeat)
 	mux.HandleFunc("GET /v1/nodes", d.handleListNodes)
 	mux.HandleFunc("GET /v1/backup", d.handleBackup)
+	mux.HandleFunc("POST /v1/restore", d.handleRestore)
 	mux.HandleFunc("POST /webhooks/github", d.handleGitHubWebhook)
 
 	var handler http.Handler = mux
@@ -654,6 +655,42 @@ func (d *Daemon) handleBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s-backup.tar.gz"`, orgID, appName))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, f)
+}
+
+func (d *Daemon) handleRestore(w http.ResponseWriter, r *http.Request) {
+	const maxRestoreBodyBytes = 64 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxRestoreBodyBytes)
+
+	tmpFile, err := os.CreateTemp(os.TempDir(), "smallcloud-restore-*.tar.gz")
+	if err != nil {
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := io.Copy(tmpFile, r.Body); err != nil {
+		_ = tmpFile.Close()
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeHTTPError(w, http.StatusRequestEntityTooLarge, "request body exceeds 64 MiB limit")
+			return
+		}
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	manifest, err := RestoreBackupBundle(d, tmpPath)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeHTTPJSON(w, http.StatusOK, manifest)
 }
 
 func isValidationError(err error) bool {

@@ -149,20 +149,25 @@ func (r DockerRuntime) Start(ctx context.Context, spec ContainerSpec) (string, e
 	}
 
 	name := containerName(spec.OrgID, spec.AppName, spec.ReleaseID)
-	cpus := strconv.FormatFloat(float64(spec.CPUMillicores)/1000.0, 'f', -1, 64)
-	memory := fmt.Sprintf("%dm", spec.MemoryMB)
 	portMap := fmt.Sprintf("127.0.0.1:%d:%d", spec.Port, spec.Port)
 
 	runArgs := []string{
 		"run", "-d", "--rm",
 		"--name", name,
+		"--label", "smallcloud.managed=true",
 		"--label", "smallcloud.org=" + spec.OrgID,
 		"--label", "smallcloud.app=" + spec.AppName,
 		"--label", "smallcloud.release=" + spec.ReleaseID,
-		"--cpus", cpus,
-		"--memory", memory,
-		"-p", portMap,
 	}
+
+	if spec.CPUMillicores > 0 {
+		runArgs = append(runArgs, "--cpus", fmt.Sprintf("%.3f", float64(spec.CPUMillicores)/1000.0))
+	}
+	if spec.MemoryMB > 0 {
+		runArgs = append(runArgs, "--memory", fmt.Sprintf("%dm", spec.MemoryMB))
+	}
+
+	runArgs = append(runArgs, "-p", portMap)
 
 	if sqlitePath := strings.TrimSpace(spec.SQLitePath); sqlitePath != "" {
 		sqliteDir := filepath.Dir(sqlitePath)

@@ -1477,3 +1477,83 @@ func TestBackupEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 with bearer token, got %d: %s", authRec.Code, authRec.Body.String())
 	}
 }
+
+func TestRestoreEndpoint(t *testing.T) {
+	dA := newTestServerDaemon(t)
+	cfg := sampleConfig()
+	if _, err := dA.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	sqliteSrc := filepath.Join(t.TempDir(), "app.db")
+	payload := append([]byte("SQLite format 3\x00"), bytes.Repeat([]byte{0x42, 0x99, 0x00, 0x13}, 512)...)
+	if err := os.WriteFile(sqliteSrc, payload, 0o600); err != nil {
+		t.Fatalf("write sqlite src: %v", err)
+	}
+	syncedMeta, err := dA.Storage().SyncWAL(cfg.App.OrgID, cfg.App.Name, sqliteSrc)
+	if err != nil {
+		t.Fatalf("SyncWAL: %v", err)
+	}
+
+	bundlePath := filepath.Join(t.TempDir(), "backup.tar.gz")
+	exported, err := ExportBackupBundle(dA, cfg.App.OrgID, cfg.App.Name, bundlePath)
+	if err != nil {
+		t.Fatalf("ExportBackupBundle: %v", err)
+	}
+	bundleBytes, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatalf("read bundle: %v", err)
+	}
+
+	dB := newTestServerDaemon(t)
+	h := dB.HandlerWithAuth("")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/restore", bytes.NewReader(bundleBytes))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var manifest BackupManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatalf("unmarshal restore response: %v", err)
+	}
+	if manifest.OrgID != exported.OrgID || manifest.AppName != exported.AppName {
+		t.Fatalf("manifest tenant = %s/%s, want %s/%s", manifest.OrgID, manifest.AppName, exported.OrgID, exported.AppName)
+	}
+	if manifest.Snapshot == nil || manifest.Snapshot.SHA256 != syncedMeta.SHA256 {
+		t.Fatalf("manifest snapshot = %+v, want sha256 %s", manifest.Snapshot, syncedMeta.SHA256)
+	}
+
+	verifiedMeta, err := dB.Storage().VerifySnapshot(cfg.App.OrgID, cfg.App.Name)
+	if err != nil {
+		t.Fatalf("VerifySnapshot: %v", err)
+	}
+	if verifiedMeta.SHA256 != syncedMeta.SHA256 {
+		t.Fatalf("verified sha256 = %s, want %s", verifiedMeta.SHA256, syncedMeta.SHA256)
+	}
+
+	corruptReq := httptest.NewRequest(http.MethodPost, "/v1/restore", bytes.NewBufferString("corrupt-archive-data"))
+	corruptRec := httptest.NewRecorder()
+	h.ServeHTTP(corruptRec, corruptReq)
+	if corruptRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for corrupt archive, got %d: %s", corruptRec.Code, corruptRec.Body.String())
+	}
+
+	authH := dB.HandlerWithAuth("secret-token")
+	unauthReq := httptest.NewRequest(http.MethodPost, "/v1/restore", bytes.NewReader(bundleBytes))
+	unauthRec := httptest.NewRecorder()
+	authH.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without bearer token, got %d: %s", unauthRec.Code, unauthRec.Body.String())
+	}
+
+	authReq := httptest.NewRequest(http.MethodPost, "/v1/restore", bytes.NewReader(bundleBytes))
+	authReq.Header.Set("Authorization", "Bearer secret-token")
+	authRec := httptest.NewRecorder()
+	authH.ServeHTTP(authRec, authReq)
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with bearer token, got %d: %s", authRec.Code, authRec.Body.String())
+	}
+}

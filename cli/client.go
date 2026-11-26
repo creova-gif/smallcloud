@@ -425,3 +425,68 @@ func (c *DaemonClient) DownloadBackup(ctx context.Context, orgID, appName, destP
 	cleanup = false
 	return nil
 }
+
+func (c *DaemonClient) RestoreBackup(ctx context.Context, bundlePath string) (daemon.BackupManifest, error) {
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	if base == "" {
+		return daemon.BackupManifest{}, errors.New("daemon base URL is empty")
+	}
+	if strings.TrimSpace(bundlePath) == "" {
+		return daemon.BackupManifest{}, errors.New("bundlePath is required")
+	}
+
+	f, err := os.Open(bundlePath)
+	if err != nil {
+		return daemon.BackupManifest{}, fmt.Errorf("open backup bundle %q: %w", bundlePath, err)
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	const path = "/v1/restore"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, f)
+	if err != nil {
+		return daemon.BackupManifest{}, fmt.Errorf("build POST %s request: %w", path, err)
+	}
+	if info, statErr := f.Stat(); statErr == nil {
+		req.ContentLength = info.Size()
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return daemon.BackupManifest{}, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	rawResp, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return daemon.BackupManifest{}, fmt.Errorf("read POST %s response: %w", path, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errPayload struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(rawResp, &errPayload)
+		msg := strings.TrimSpace(errPayload.Error)
+		if msg == "" {
+			msg = strings.TrimSpace(string(rawResp))
+		}
+		if msg != "" {
+			return daemon.BackupManifest{}, fmt.Errorf("daemon POST %s failed (status %d): %s", path, resp.StatusCode, msg)
+		}
+		return daemon.BackupManifest{}, fmt.Errorf("daemon POST %s failed (status %d)", path, resp.StatusCode)
+	}
+
+	var manifest daemon.BackupManifest
+	if err := json.Unmarshal(rawResp, &manifest); err != nil {
+		return daemon.BackupManifest{}, fmt.Errorf("decode POST %s response: %w", path, err)
+	}
+	return manifest, nil
+}

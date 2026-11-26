@@ -139,10 +139,11 @@ func TestDockerRuntimeStartAndStop(t *testing.T) {
 	runStr := strings.Join(runCall.args, " ")
 	for _, want := range []string{
 		"--name sc-acme-billing-rel-42",
+		"--label smallcloud.managed=true",
 		"--label smallcloud.org=acme",
 		"--label smallcloud.app=billing",
 		"--label smallcloud.release=rel-42",
-		"--cpus 0.75",
+		"--cpus 0.750",
 		"--memory 512m",
 		"-p 127.0.0.1:18042:18042",
 		"-v /data/billing:/data/billing",
@@ -527,5 +528,86 @@ func TestDockerRuntimeLogs(t *testing.T) {
 	}
 	if called {
 		t.Fatal("CommandRunner should not be called when validation fails")
+	}
+}
+
+func TestDockerRuntimeStartResourceLimitsAndLabels(t *testing.T) {
+	tests := []struct {
+		name          string
+		cpuMillicores int
+		memoryMB      int
+		wantCPUs      string
+		wantMemory    string
+	}{
+		{
+			name:          "fractional cpu",
+			cpuMillicores: 500,
+			memoryMB:      256,
+			wantCPUs:      "0.500",
+			wantMemory:    "256m",
+		},
+		{
+			name:          "whole cpu",
+			cpuMillicores: 1000,
+			memoryMB:      1024,
+			wantCPUs:      "1.000",
+			wantMemory:    "1024m",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var runArgs []string
+			rt := DockerRuntime{
+				CommandRunner: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+					if len(args) > 0 && args[0] == "run" {
+						runArgs = append([]string(nil), args...)
+					}
+					return []byte("ok"), nil
+				},
+			}
+
+			spec := ContainerSpec{
+				OrgID:         "acme",
+				AppName:       "api",
+				ReleaseID:     "rel-99",
+				AppDir:        "/srv/apps/api",
+				Port:          19000,
+				CPUMillicores: tc.cpuMillicores,
+				MemoryMB:      tc.memoryMB,
+			}
+
+			if _, err := rt.Start(context.Background(), spec); err != nil {
+				t.Fatalf("DockerRuntime.Start failed: %v", err)
+			}
+
+			wantImage := "smallcloud-acme-api:rel-99"
+			if len(runArgs) == 0 || runArgs[len(runArgs)-1] != wantImage {
+				t.Fatalf("expected image %q as last arg, got %v", wantImage, runArgs)
+			}
+
+			flagArgs := runArgs[:len(runArgs)-1]
+			requiredPairs := [][2]string{
+				{"--label", "smallcloud.managed=true"},
+				{"--label", "smallcloud.org=acme"},
+				{"--label", "smallcloud.app=api"},
+				{"--label", "smallcloud.release=rel-99"},
+				{"--cpus", tc.wantCPUs},
+				{"--memory", tc.wantMemory},
+			}
+
+			for _, pair := range requiredPairs {
+				found := false
+				for i := 0; i+1 < len(flagArgs); i++ {
+					if flagArgs[i] == pair[0] && flagArgs[i+1] == pair[1] {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("expected %s %s before image arg in %v", pair[0], pair[1], runArgs)
+				}
+			}
+		})
 	}
 }

@@ -1090,3 +1090,78 @@ func TestCLIRemoteBackup(t *testing.T) {
 		t.Fatalf("expected no local state.json when routing backup to remote daemon, got %v", err)
 	}
 }
+
+func TestCLIRemoteRestoreBundle(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	srcDir := t.TempDir()
+	srcDaemon := daemon.NewDaemon(filepath.Join(srcDir, "cgroups"), filepath.Join(srcDir, "replicas"))
+
+	pkg, err := PackageApp(templateDir)
+	if err != nil {
+		t.Fatalf("PackageApp failed: %v", err)
+	}
+	if _, err := srcDaemon.Deploy(pkg.Config, "v1.0.0"); err != nil {
+		t.Fatalf("Deploy failed: %v", err)
+	}
+	dbFile := filepath.Join(t.TempDir(), "app.db")
+	if err := os.WriteFile(dbFile, []byte("SQLite format 3\x00remote-restore-roundtrip"), 0o600); err != nil {
+		t.Fatalf("write db file: %v", err)
+	}
+	synced, err := srcDaemon.Storage().SyncWAL(pkg.Config.App.OrgID, pkg.Config.App.Name, dbFile)
+	if err != nil {
+		t.Fatalf("SyncWAL failed: %v", err)
+	}
+
+	const token = "cli-remote-restore-secret"
+	srcSrv := httptest.NewServer(srcDaemon.HandlerWithAuth(token))
+	defer srcSrv.Close()
+
+	localStateDir := t.TempDir()
+	bundlePath := filepath.Join(t.TempDir(), "roundtrip-backup.tar.gz")
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srcSrv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+
+	var backupOut bytes.Buffer
+	if err := Run([]string{"backup", templateDir, bundlePath}, localStateDir, &backupOut); err != nil {
+		t.Fatalf("remote backup failed: %v", err)
+	}
+	var backupManifest daemon.BackupManifest
+	if err := json.Unmarshal(backupOut.Bytes(), &backupManifest); err != nil {
+		t.Fatalf("unmarshal backup manifest: %v", err)
+	}
+	if backupManifest.Snapshot == nil || backupManifest.Snapshot.SHA256 != synced.SHA256 {
+		t.Fatalf("unexpected backup manifest snapshot: %+v", backupManifest.Snapshot)
+	}
+
+	dstDir := t.TempDir()
+	dstDaemon := daemon.NewDaemon(filepath.Join(dstDir, "cgroups"), filepath.Join(dstDir, "replicas"))
+	dstSrv := httptest.NewServer(dstDaemon.HandlerWithAuth(token))
+	defer dstSrv.Close()
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", dstSrv.URL)
+	var restoreOut bytes.Buffer
+	if err := Run([]string{"restore-bundle", bundlePath}, localStateDir, &restoreOut); err != nil {
+		t.Fatalf("remote restore-bundle failed: %v", err)
+	}
+	var restoredManifest daemon.BackupManifest
+	if err := json.Unmarshal(restoreOut.Bytes(), &restoredManifest); err != nil {
+		t.Fatalf("unmarshal restored manifest: %v", err)
+	}
+	if restoredManifest.OrgID != pkg.Config.App.OrgID || restoredManifest.AppName != pkg.Config.App.Name {
+		t.Fatalf("unexpected restored manifest tenant: %+v", restoredManifest)
+	}
+	if restoredManifest.Snapshot == nil || restoredManifest.Snapshot.SHA256 != synced.SHA256 {
+		t.Fatalf("expected restored snapshot sha256 %s, got %+v", synced.SHA256, restoredManifest.Snapshot)
+	}
+
+	verified, err := dstDaemon.Storage().VerifySnapshot(pkg.Config.App.OrgID, pkg.Config.App.Name)
+	if err != nil {
+		t.Fatalf("VerifySnapshot on destination daemon failed: %v", err)
+	}
+	if verified.SHA256 != synced.SHA256 || verified.SizeBytes != synced.SizeBytes {
+		t.Fatalf("verified metadata %+v does not match synced %+v", verified, synced)
+	}
+	if _, err := os.Stat(filepath.Join(localStateDir, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no local state.json when routing restore-bundle to remote daemon, got %v", err)
+	}
+}
