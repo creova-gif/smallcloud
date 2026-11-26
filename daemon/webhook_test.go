@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -128,5 +130,126 @@ func TestWebhookNotifyEmptyURLNoop(t *testing.T) {
 	var nilNotifier *WebhookNotifier
 	if err := nilNotifier.Notify(context.Background(), WebhookPayload{Event: "budget_warning"}); err != nil {
 		t.Fatalf("expected nil error for nil notifier, got %v", err)
+	}
+}
+
+func TestWebhookNotifyRetrySuccessOnThirdAttempt(t *testing.T) {
+	var attempts atomic.Int32
+	var lastBody []byte
+	var lastSig string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read request body: %v", err)
+		}
+		lastBody = body
+		lastSig = r.Header.Get("X-SmallCloud-Signature-256")
+		if n < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	secret := "retry-secret"
+	notifier := &WebhookNotifier{
+		URL:            srv.URL,
+		Secret:         secret,
+		Client:         srv.Client(),
+		RetryBaseDelay: time.Millisecond,
+	}
+
+	err := notifier.Notify(context.Background(), WebhookPayload{
+		Event:   "budget_warning",
+		OrgID:   "org-alpha",
+		AppName: "app-one",
+	})
+	if err != nil {
+		t.Fatalf("expected Notify to succeed on 3rd attempt, got %v", err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("expected 3 attempts, got %d", got)
+	}
+	if wantSig := SignPayload(secret, lastBody); lastSig != wantSig {
+		t.Fatalf("expected signature %q on 3rd attempt, got %q", wantSig, lastSig)
+	}
+}
+
+func TestWebhookNotifyNoRetryOn4xx(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	notifier := &WebhookNotifier{
+		URL:            srv.URL,
+		Secret:         "secret",
+		Client:         srv.Client(),
+		RetryBaseDelay: time.Millisecond,
+	}
+
+	err := notifier.Notify(context.Background(), WebhookPayload{
+		Event:   "budget_warning",
+		OrgID:   "org-alpha",
+		AppName: "app-one",
+	})
+	if err == nil {
+		t.Fatalf("expected error on 400 status, got nil")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected 1 attempt without retry on 400, got %d", got)
+	}
+}
+
+func TestWebhookNotifyContextCancelDuringBackoff(t *testing.T) {
+	var attempts atomic.Int32
+	firstAttemptDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			close(firstAttemptDone)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	notifier := &WebhookNotifier{
+		URL:            srv.URL,
+		Secret:         "secret",
+		Client:         srv.Client(),
+		MaxRetries:     2,
+		RetryBaseDelay: 5 * time.Second,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		<-firstAttemptDone
+		cancel()
+	}()
+
+	start := time.Now()
+	err := notifier.Notify(ctx, WebhookPayload{
+		Event:   "budget_hard_stop",
+		OrgID:   "org-alpha",
+		AppName: "app-one",
+	})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("expected backoff to abort promptly on cancel, took %v", elapsed)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected 1 attempt before cancel, got %d", got)
 	}
 }

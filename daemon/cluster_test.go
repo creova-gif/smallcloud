@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -140,4 +142,55 @@ func TestWorkerPoolPruneStale(t *testing.T) {
 	if len(remaining) != 1 || remaining[0].ID != "fresh-1" {
 		t.Fatalf("expected only fresh-1 remaining, got %+v", remaining)
 	}
+}
+
+func TestWorkerPoolRemoveAndConcurrentOps(t *testing.T) {
+	pool := NewWorkerPool()
+
+	if pool.RemoveNode("") {
+		t.Fatal("expected false removing empty node id")
+	}
+	if pool.RemoveNode("missing") {
+		t.Fatal("expected false removing missing node")
+	}
+
+	if _, err := pool.RegisterNode(WorkerNode{ID: "node-1", Address: "10.0.0.1:8080", Region: "us-east"}); err != nil {
+		t.Fatalf("register node-1: %v", err)
+	}
+	if !pool.RemoveNode("node-1") {
+		t.Fatal("expected true removing existing node-1")
+	}
+	if pool.RemoveNode("node-1") {
+		t.Fatal("expected false removing already removed node-1")
+	}
+	if nodes := pool.ListNodes(); len(nodes) != 0 {
+		t.Fatalf("expected 0 nodes after removal, got %+v", nodes)
+	}
+
+	const workers = 12
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for g := 0; g < workers; g++ {
+		go func(workerIdx int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				id := fmt.Sprintf("worker-%d-%d", workerIdx%4, i%5)
+				_, _ = pool.RegisterNode(WorkerNode{
+					ID:         id,
+					Address:    fmt.Sprintf("10.0.%d.%d:8080", workerIdx%4, i%5+1),
+					Region:     "us-east",
+					MaxApps:    10,
+					ActiveApps: i % 5,
+				})
+				_, _ = pool.Heartbeat(id, i%6)
+				_ = pool.ListNodes()
+				_, _ = pool.SelectNode("us-east")
+				if i%3 == 0 {
+					_ = pool.RemoveNode(id)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }

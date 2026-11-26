@@ -1288,6 +1288,83 @@ func TestWorkerNodesEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeleteNodeEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodDelete, "/v1/nodes?id=worker-1", nil)
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	emptyReq := httptest.NewRequest(http.MethodDelete, "/v1/nodes", nil)
+	emptyReq.Header.Set("Authorization", "Bearer secret-token")
+	emptyRec := httptest.NewRecorder()
+	h.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty id, got %d: %s", emptyRec.Code, emptyRec.Body.String())
+	}
+
+	missingReq := httptest.NewRequest(http.MethodDelete, "/v1/nodes?id=missing", nil)
+	missingReq.Header.Set("Authorization", "Bearer secret-token")
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing node, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	if _, err := d.WorkerPool().RegisterNode(WorkerNode{
+		ID:      "worker-1",
+		Address: "10.0.1.10:8080",
+		Region:  "us-east",
+	}); err != nil {
+		t.Fatalf("register node: %v", err)
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/v1/nodes?id=worker-1", nil)
+	delReq.Header.Set("Authorization", "Bearer secret-token")
+	delRec := httptest.NewRecorder()
+	h.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on delete node, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+	var delResp struct {
+		Deleted bool   `json:"deleted"`
+		ID      string `json:"id"`
+	}
+	if err := json.Unmarshal(delRec.Body.Bytes(), &delResp); err != nil {
+		t.Fatalf("unmarshal delete response: %v", err)
+	}
+	if !delResp.Deleted || delResp.ID != "worker-1" {
+		t.Fatalf("unexpected delete response: %+v", delResp)
+	}
+	if nodes := d.WorkerPool().ListNodes(); len(nodes) != 0 {
+		t.Fatalf("expected 0 nodes after delete, got %+v", nodes)
+	}
+
+	events := d.Audit().List("", "", 0)
+	foundAudit := false
+	for _, ev := range events {
+		if ev.Type == "node_removed" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatalf("expected node_removed audit event, got %+v", events)
+	}
+
+	secondDelReq := httptest.NewRequest(http.MethodDelete, "/v1/nodes?id=worker-1", nil)
+	secondDelReq.Header.Set("Authorization", "Bearer secret-token")
+	secondDelRec := httptest.NewRecorder()
+	h.ServeHTTP(secondDelRec, secondDelReq)
+	if secondDelRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on second delete, got %d", secondDelRec.Code)
+	}
+}
+
 func TestGitHubWebhookEndpoint(t *testing.T) {
 	d := newTestServerDaemon(t)
 	h := d.HandlerWithAuth("secret-token")

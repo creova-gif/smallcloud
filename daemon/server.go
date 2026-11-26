@@ -99,6 +99,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("POST /v1/nodes/register", d.handleNodeRegister)
 	mux.HandleFunc("POST /v1/nodes/heartbeat", d.handleNodeHeartbeat)
 	mux.HandleFunc("GET /v1/nodes", d.handleListNodes)
+	mux.HandleFunc("DELETE /v1/nodes", d.handleDeleteNode)
 	mux.HandleFunc("GET /v1/backup", d.handleBackup)
 	mux.HandleFunc("POST /v1/restore", d.handleRestore)
 	mux.HandleFunc("POST /webhooks/github", d.handleGitHubWebhook)
@@ -628,6 +629,26 @@ func (d *Daemon) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
 		"nodes": d.WorkerPool().ListNodes(),
+	})
+}
+
+func (d *Daemon) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeHTTPError(w, http.StatusBadRequest, "worker node id is required")
+		return
+	}
+	if !d.WorkerPool().RemoveNode(id) {
+		writeHTTPError(w, http.StatusNotFound, fmt.Sprintf("%s: %s", ErrNodeNotFound.Error(), id))
+		return
+	}
+	d.Audit().Record(AuditEvent{
+		Type:   "node_removed",
+		Detail: fmt.Sprintf("id=%s", id),
+	})
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"id":      id,
 	})
 }
 

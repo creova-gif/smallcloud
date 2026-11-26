@@ -537,3 +537,80 @@ func TestDaemonClientReconcileCanary(t *testing.T) {
 		t.Fatalf("expected 401 error, got %v", err)
 	}
 }
+
+func TestDaemonClientHeartbeatAndRemoveNode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/nodes/heartbeat":
+			var req struct {
+				ID         string `json:"id"`
+				ActiveApps int    `json:"active_apps"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode heartbeat request: %v", err)
+			}
+			if req.ID == "missing" {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"worker node not found"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(daemon.WorkerNode{
+				ID:         req.ID,
+				Address:    "10.0.0.1:8080",
+				ActiveApps: req.ActiveApps,
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/nodes":
+			id := r.URL.Query().Get("id")
+			if id == "missing" {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"worker node not found"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"deleted": true,
+				"id":      id,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	unauthClient := NewDaemonClient(srv.URL, "wrong-tok")
+	ctx := context.Background()
+
+	node, err := client.HeartbeatNode(ctx, "worker-1", 4)
+	if err != nil {
+		t.Fatalf("HeartbeatNode failed: %v", err)
+	}
+	if node.ID != "worker-1" || node.ActiveApps != 4 {
+		t.Fatalf("unexpected heartbeat node: %+v", node)
+	}
+
+	if _, err := client.HeartbeatNode(ctx, "missing", 1); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected 404 error from HeartbeatNode, got %v", err)
+	}
+
+	if _, err := unauthClient.HeartbeatNode(ctx, "worker-1", 1); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error from HeartbeatNode, got %v", err)
+	}
+
+	if err := client.RemoveNode(ctx, "worker-1"); err != nil {
+		t.Fatalf("RemoveNode failed: %v", err)
+	}
+
+	if err := client.RemoveNode(ctx, "missing"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected 404 error from RemoveNode, got %v", err)
+	}
+
+	if err := unauthClient.RemoveNode(ctx, "worker-1"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error from RemoveNode, got %v", err)
+	}
+}

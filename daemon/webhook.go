@@ -25,9 +25,11 @@ type WebhookPayload struct {
 }
 
 type WebhookNotifier struct {
-	URL    string
-	Secret string
-	Client *http.Client
+	URL            string
+	Secret         string
+	Client         *http.Client
+	MaxRetries     int
+	RetryBaseDelay time.Duration
 }
 
 func SignPayload(secret string, body []byte) string {
@@ -49,29 +51,64 @@ func (n *WebhookNotifier) Notify(ctx context.Context, payload WebhookPayload) er
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if sig := SignPayload(n.Secret, body); sig != "" {
-		req.Header.Set("X-SmallCloud-Signature-256", sig)
-	}
+	sig := SignPayload(n.Secret, body)
 
 	client := n.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
+	maxRetries := n.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 2
+	} else if maxRetries < 0 {
+		maxRetries = 0
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("webhook returned status %d", resp.StatusCode)
+	baseDelay := n.RetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = 25 * time.Millisecond
 	}
-	return nil
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if sig != "" {
+			req.Header.Set("X-SmallCloud-Signature-256", sig)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				return nil
+			}
+			lastErr = fmt.Errorf("webhook returned status %d", resp.StatusCode)
+			if resp.StatusCode < http.StatusInternalServerError {
+				return lastErr
+			}
+		}
+
+		if attempt == maxRetries {
+			break
+		}
+
+		timer := time.NewTimer(baseDelay << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
 }

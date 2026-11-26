@@ -142,3 +142,16 @@ func (p *WorkerPool) PruneStale(maxAge time.Duration, now time.Time) int {
 	}
 	return pruned
 }
+
+func (p *WorkerPool) RemoveNode(id string) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.nodes[id]; !ok {
+		return false
+	}
+	delete(p.nodes, id)
+	return true
+}

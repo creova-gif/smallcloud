@@ -365,6 +365,27 @@ func (c *DaemonClient) ListNodes(ctx context.Context) ([]daemon.WorkerNode, erro
 	return out.Nodes, nil
 }
 
+func (c *DaemonClient) HeartbeatNode(ctx context.Context, id string, activeApps int) (daemon.WorkerNode, error) {
+	req := struct {
+		ID         string `json:"id"`
+		ActiveApps int    `json:"active_apps"`
+	}{
+		ID:         id,
+		ActiveApps: activeApps,
+	}
+	var out daemon.WorkerNode
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/nodes/heartbeat", req, &out); err != nil {
+		return daemon.WorkerNode{}, err
+	}
+	return out, nil
+}
+
+func (c *DaemonClient) RemoveNode(ctx context.Context, id string) error {
+	q := url.Values{}
+	q.Set("id", id)
+	return c.doJSON(ctx, http.MethodDelete, "/v1/nodes?"+q.Encode(), nil, nil)
+}
+
 func (c *DaemonClient) DownloadBackup(ctx context.Context, orgID, appName, destPath string) error {
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if base == "" {
