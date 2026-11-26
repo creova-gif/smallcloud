@@ -201,14 +201,14 @@ func TestDaemonClientCanaryLogsOrgQuotaAndPrune(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/canary":
 			var req struct {
-				OrgID      string `json:"org_id"`
-				AppName    string `json:"app_name"`
-				StandbyPct int    `json:"standby_pct"`
+				OrgID        string `json:"org_id"`
+				AppName      string `json:"app_name"`
+				CanaryWeight int    `json:"canary_weight"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode canary request: %v", err)
 			}
-			if req.OrgID != "org-alpha" || req.AppName != "micro-crm" || req.StandbyPct != 25 {
+			if req.OrgID != "org-alpha" || req.AppName != "micro-crm" || req.CanaryWeight != 25 {
 				t.Fatalf("unexpected canary request: %+v", req)
 			}
 			_ = json.NewEncoder(w).Encode(daemon.RouteEntry{
@@ -217,7 +217,7 @@ func TestDaemonClientCanaryLogsOrgQuotaAndPrune(t *testing.T) {
 				ActiveColor:      daemon.ColorBlue,
 				ActiveReleaseID:  "v1.1.0",
 				StandbyReleaseID: "v1.0.0",
-				CanaryWeight:     req.StandbyPct,
+				CanaryWeight:     req.CanaryWeight,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/logs":
 			q := r.URL.Query()

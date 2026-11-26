@@ -26,6 +26,33 @@ const uiHTML = `<!DOCTYPE html>
     --amber: #f59e0b;
   }
   * { box-sizing: border-box; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .skip-link {
+    position: absolute;
+    top: -48px;
+    left: 16px;
+    background: #2563eb;
+    color: #fff;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+    z-index: 100;
+  }
+  .skip-link:focus {
+    top: 16px;
+  }
   body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -64,17 +91,19 @@ const uiHTML = `<!DOCTYPE html>
     align-items: center;
     gap: 10px;
   }
-  input[type="password"], input[type="text"] {
+  input[type="password"], input[type="text"], select {
     background: var(--panel);
     border: 1px solid var(--border);
     color: var(--text);
     padding: 8px 12px;
     border-radius: 6px;
     font-size: 0.875rem;
+  }
+  input[type="password"], input[type="text"] {
     min-width: 220px;
   }
   button {
-    background: var(--accent);
+    background: #2563eb;
     color: #fff;
     border: none;
     padding: 8px 14px;
@@ -85,6 +114,10 @@ const uiHTML = `<!DOCTYPE html>
   }
   button:hover { opacity: 0.92; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
   .banner {
     display: none;
     padding: 10px 14px;
@@ -129,9 +162,17 @@ const uiHTML = `<!DOCTYPE html>
   }
   .section-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
     margin-bottom: 14px;
+  }
+  .section-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
   }
   .section-head h2 {
     margin: 0;
@@ -140,6 +181,10 @@ const uiHTML = `<!DOCTYPE html>
   .meta {
     color: var(--muted);
     font-size: 0.8rem;
+  }
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   table {
     width: 100%;
@@ -178,9 +223,25 @@ const uiHTML = `<!DOCTYPE html>
     font-size: 0.875rem;
     padding: 12px 0;
   }
+  @media (max-width: 640px) {
+    .container {
+      padding: 16px 12px 36px;
+    }
+    .controls {
+      width: 100%;
+    }
+    input[type="password"], input[type="text"] {
+      min-width: 0;
+      flex: 1 1 160px;
+    }
+    section {
+      padding: 14px 12px;
+    }
+  }
 </style>
 </head>
 <body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
 <div class="container">
   <header>
     <div class="brand">
@@ -188,29 +249,48 @@ const uiHTML = `<!DOCTYPE html>
       <p>Operator Dashboard</p>
     </div>
     <div class="controls">
-      <input id="token-input" type="password" placeholder="Optional Bearer token" aria-label="Bearer token">
-      <button id="refresh-btn" type="button">Refresh</button>
+      <label class="sr-only" for="token-input">API Bearer Token</label>
+      <input id="token-input" type="password" placeholder="Optional Bearer token" aria-label="API Bearer Token">
+      <button id="refresh-btn" type="button" aria-label="Refresh dashboard">Refresh</button>
     </div>
   </header>
 
-  <div id="error-banner" class="banner" role="alert"></div>
-  <div id="status-banner" class="banner success" role="status"></div>
+  <div id="error-banner" class="banner" role="alert" aria-live="assertive"></div>
+  <div id="status-banner" class="banner success" role="status" aria-live="polite"></div>
 
-  <section>
-    <div class="section-head">
-      <h2>Apps</h2>
-      <span id="apps-count" class="meta">0 apps</span>
-    </div>
-    <div id="apps-container"></div>
-  </section>
+  <main id="main-content">
+    <section aria-labelledby="apps-heading">
+      <div class="section-head">
+        <h2 id="apps-heading">Apps</h2>
+        <span id="apps-count" class="meta">0 apps</span>
+      </div>
+      <div id="apps-container"></div>
+    </section>
 
-  <section>
-    <div class="section-head">
-      <h2>Recent Audit Events</h2>
-      <span id="events-count" class="meta">0 events</span>
-    </div>
-    <div id="events-container"></div>
-  </section>
+    <section aria-labelledby="events-heading">
+      <div class="section-head">
+        <h2 id="events-heading">Recent Audit Events</h2>
+        <div class="section-actions">
+          <label class="sr-only" for="event-type-filter">Filter audit events by type</label>
+          <select id="event-type-filter" aria-label="Filter audit events by type">
+            <option value="">All</option>
+            <option value="deploy">deploy</option>
+            <option value="rollback">rollback</option>
+            <option value="canary">canary</option>
+            <option value="canary_promoted">canary_promoted</option>
+            <option value="canary_rollback">canary_rollback</option>
+            <option value="budget_alert">budget_alert</option>
+            <option value="budget_halted">budget_halted</option>
+            <option value="rollover">rollover</option>
+            <option value="delete">delete</option>
+            <option value="gitops_push">gitops_push</option>
+          </select>
+          <span id="events-count" class="meta">0 events</span>
+        </div>
+      </div>
+      <div id="events-container"></div>
+    </section>
+  </main>
 </div>
 
 <script>
@@ -224,6 +304,7 @@ const uiHTML = `<!DOCTYPE html>
   var eventsContainer = document.getElementById("events-container");
   var appsCount = document.getElementById("apps-count");
   var eventsCount = document.getElementById("events-count");
+  var eventTypeFilter = document.getElementById("event-type-filter");
 
   var savedToken = sessionStorage.getItem(TOKEN_KEY) || "";
   tokenInput.value = savedToken;
@@ -292,9 +373,7 @@ const uiHTML = `<!DOCTYPE html>
     var table = document.createElement("table");
     var thead = document.createElement("thead");
     var headRow = document.createElement("tr");
-    ["Org", "App", "Active Release", "Color", "Spend / Cap", "Halted", "Actions"].forEach(function(h) {
-      headRow.appendChild(el("th", "", h));
-    });
+    headRow.innerHTML = '<th scope="col">Org</th><th scope="col">App</th><th scope="col">Active Release</th><th scope="col">Color</th><th scope="col">Spend / Cap</th><th scope="col">Halted</th><th scope="col">Actions</th>';
     thead.appendChild(headRow);
     table.appendChild(thead);
 
@@ -307,6 +386,7 @@ const uiHTML = `<!DOCTYPE html>
       var colorClass = color === "blue" ? "badge badge-blue" : (color === "green" ? "badge badge-green" : "badge badge-muted");
       var halted = Boolean(route.halted || budget.halted);
       var spendText = formatUSD(budget.current_usd) + " / " + (budget.max_monthly_usd > 0 ? formatUSD(budget.max_monthly_usd) : "unlimited");
+      var appLabel = (app.org_id || "") + "/" + (app.app_name || "");
 
       tr.appendChild(el("td", "mono", app.org_id || ""));
       tr.appendChild(el("td", "mono", app.app_name || ""));
@@ -327,6 +407,7 @@ const uiHTML = `<!DOCTYPE html>
 
       var rollbackBtn = el("button", "btn-sm btn-danger", "Rollback");
       rollbackBtn.type = "button";
+      rollbackBtn.setAttribute("aria-label", "Rollback " + appLabel);
       rollbackBtn.addEventListener("click", function() {
         runAppAction("Rollback", "/v1/rollback", { org_id: app.org_id, app_name: app.app_name }, rollbackBtn);
       });
@@ -334,6 +415,7 @@ const uiHTML = `<!DOCTYPE html>
 
       var canaryBtn = el("button", "btn-sm btn-secondary", "Reconcile Canary");
       canaryBtn.type = "button";
+      canaryBtn.setAttribute("aria-label", "Reconcile Canary " + appLabel);
       canaryBtn.addEventListener("click", function() {
         runAppAction("Reconcile Canary", "/v1/canary/reconcile", { org_id: app.org_id, app_name: app.app_name }, canaryBtn);
       });
@@ -341,6 +423,7 @@ const uiHTML = `<!DOCTYPE html>
 
       var pruneBtn = el("button", "btn-sm btn-secondary", "Prune");
       pruneBtn.type = "button";
+      pruneBtn.setAttribute("aria-label", "Prune " + appLabel);
       pruneBtn.addEventListener("click", function() {
         runAppAction("Prune", "/v1/prune", { org_id: app.org_id, app_name: app.app_name, keep_last: 5 }, pruneBtn);
       });
@@ -352,7 +435,9 @@ const uiHTML = `<!DOCTYPE html>
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
-    appsContainer.appendChild(table);
+    var tableWrap = el("div", "table-wrap");
+    tableWrap.appendChild(table);
+    appsContainer.appendChild(tableWrap);
   }
 
   function renderEvents(events) {
@@ -366,9 +451,7 @@ const uiHTML = `<!DOCTYPE html>
     var table = document.createElement("table");
     var thead = document.createElement("thead");
     var headRow = document.createElement("tr");
-    ["Time", "Type", "Org / App", "Release", "Detail"].forEach(function(h) {
-      headRow.appendChild(el("th", "", h));
-    });
+    headRow.innerHTML = '<th scope="col">Time</th><th scope="col">Type</th><th scope="col">Org / App</th><th scope="col">Release</th><th scope="col">Detail</th>';
     thead.appendChild(headRow);
     table.appendChild(thead);
 
@@ -385,7 +468,9 @@ const uiHTML = `<!DOCTYPE html>
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
-    eventsContainer.appendChild(table);
+    var tableWrap = el("div", "table-wrap");
+    tableWrap.appendChild(table);
+    eventsContainer.appendChild(tableWrap);
   }
 
   function fetchJSON(path) {
@@ -444,12 +529,29 @@ const uiHTML = `<!DOCTYPE html>
     });
   }
 
+  function eventsPath() {
+    var selectedType = (eventTypeFilter && eventTypeFilter.value) ? eventTypeFilter.value.trim() : "";
+    if (!selectedType) {
+      return "/v1/events?limit=25";
+    }
+    return "/v1/events?limit=25&type=" + encodeURIComponent(selectedType);
+  }
+
+  function refreshEvents() {
+    showError("");
+    fetchJSON(eventsPath()).then(function(data) {
+      renderEvents((data && data.events) || []);
+    }).catch(function(err) {
+      showError(err && err.message ? err.message : "Failed to load audit events.");
+    });
+  }
+
   function refreshAll() {
     refreshBtn.disabled = true;
     showError("");
     Promise.all([
       fetchJSON("/v1/apps"),
-      fetchJSON("/v1/events?limit=25")
+      fetchJSON(eventsPath())
     ]).then(function(results) {
       renderApps((results[0] && results[0].apps) || []);
       renderEvents((results[1] && results[1].events) || []);
@@ -460,6 +562,9 @@ const uiHTML = `<!DOCTYPE html>
     });
   }
 
+  eventTypeFilter.addEventListener("change", function() {
+    refreshEvents();
+  });
   refreshBtn.addEventListener("click", function() {
     showStatus("");
     refreshAll();

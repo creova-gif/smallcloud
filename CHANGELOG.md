@@ -14,6 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Graceful Shutdown WAL Flush**: Added `Daemon.SyncAllWAL()` to flush SQLite WAL state across tenants during graceful `ServeWithContext` shutdown.
 - **Audit Event Type Filtering**: Added `AuditLog.ListFiltered` and `GET /v1/events?type=...` filtering for querying audit events by type.
 - **Strict Content-Security-Policy Headers**: Added strict `Content-Security-Policy` headers in `SecurityHeadersMiddleware` to harden HTTP and Embedded Operator Web UI responses.
+- **Operator Web UI Accessibility & Filtering**: Updated `daemon/ui.go` with WCAG 2.1 AA accessibility improvements, `:focus-visible` focus rings, ARIA live regions, responsive table wrappers, and an audit event-type filter.
+- **OpenAPI 3.1.0 Specification**: Added `docs/openapi.yaml` documenting the SmallCloud control-plane HTTP API.
+- **End-to-End HTTP Integration Suite**: Added `cli/e2e_test.go` covering full-product end-to-end HTTP integration workflows.
 
 ## [v0.2.0] - 2026-11-26
 

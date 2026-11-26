@@ -43,6 +43,14 @@ func TestUIDashboardRoutes(t *testing.T) {
 					"Rollback",
 					"Reconcile Canary",
 					"Prune",
+					":focus-visible",
+					`role="status"`,
+					`role="alert"`,
+					`aria-live="polite"`,
+					"table-wrap",
+					`scope="col"`,
+					"main-content",
+					"event-type-filter",
 				} {
 					if !strings.Contains(body, want) {
 						t.Fatalf("GET %s body missing %q", path, want)

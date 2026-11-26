@@ -1,0 +1,1477 @@
+openapi: 3.1.0
+info:
+  title: SmallCloud Daemon API
+  version: 1.0.0
+  description: >
+    HTTP control-plane and operational API for the SmallCloud daemon.
+    All `/v1/*` endpoints require Bearer token authentication when
+    `SMALLCLOUD_API_TOKEN` is configured. All responses include `X-Request-ID`,
+    `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and
+    `Content-Security-Policy` headers; `/v1/*` responses also include
+    `Cache-Control: no-store`.
+servers:
+  - url: http://localhost:8080
+    description: Local SmallCloud daemon
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Bearer token matching SMALLCLOUD_API_TOKEN.
+
+  headers:
+    RetryAfterHeader:
+      description: Seconds to wait before retrying the request.
+      schema:
+        type: integer
+        example: 60
+
+  responses:
+    BadRequest:
+      description: Bad request or validation error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing, malformed, or invalid credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PaymentRequired:
+      description: Monthly budget or org quota exceeded.
+      headers:
+        Retry-After:
+          description: Optional retry delay in seconds (e.g. 3600 on halted proxy routes).
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ErrorResponse"
+              - $ref: "#/components/schemas/AppBudgetState"
+    NotFound:
+      description: Requested app route, release, or worker node was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Conflict with current state (for example, no standby release available for rollback).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PayloadTooLarge:
+      description: Request body exceeds the 1 MiB limit (or 64 MiB limit on `/v1/restore`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    TooManyRequests:
+      description: Per-IP rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying (`60`).
+          schema:
+            type: integer
+            const: 60
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    BadGateway:
+      description: Upstream deployment or runtime operation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalServerError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: Service unavailable (no healthy worker node available or GitHub webhook secret not configured).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    AppConfig:
+      type: object
+      properties:
+        name:
+          type: string
+        org_id:
+          type: string
+        domain:
+          type: string
+        port:
+          type: integer
+        healthcheck:
+          type: string
+        runtime:
+          type: string
+
+    ResourcesConfig:
+      type: object
+      properties:
+        cpu_millicores:
+          type: integer
+        memory_mb:
+          type: integer
+
+    BudgetConfig:
+      type: object
+      properties:
+        max_monthly_usd:
+          type: number
+          format: double
+        alert_at_pct:
+          type: number
+          format: double
+        hard_stop:
+          type: boolean
+
+    StorageConfig:
+      type: object
+      properties:
+        sqlite_path:
+          type: string
+        replica_url:
+          type: string
+        sync_ms:
+          type: integer
+
+    Config:
+      type: object
+      properties:
+        app:
+          $ref: "#/components/schemas/AppConfig"
+        resources:
+          $ref: "#/components/schemas/ResourcesConfig"
+        budget:
+          $ref: "#/components/schemas/BudgetConfig"
+        storage:
+          $ref: "#/components/schemas/StorageConfig"
+        env:
+          type: object
+          additionalProperties:
+            type: string
+
+    DeployRequest:
+      type: object
+      required: [config]
+      properties:
+        config:
+          $ref: "#/components/schemas/Config"
+        release_id:
+          type: string
+
+    RollbackRequest:
+      type: object
+      required: [org_id, app_name]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+
+    MeterRequest:
+      type: object
+      required: [org_id, app_name]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        delta_usd:
+          type: number
+          format: double
+        max_monthly_usd:
+          type: number
+          format: double
+
+    RolloverRequest:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+
+    CanaryRequest:
+      type: object
+      required: [org_id, app_name, canary_weight]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        canary_weight:
+          type: integer
+
+    CanaryReconcileRequest:
+      type: object
+      required: [org_id, app_name]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        health_path:
+          type: string
+        timeout_ms:
+          type: integer
+
+    OrgQuotaRequest:
+      type: object
+      required: [org_id, max_monthly_usd]
+      properties:
+        org_id:
+          type: string
+        max_monthly_usd:
+          type: number
+          format: double
+
+    PruneRequest:
+      type: object
+      required: [org_id, app_name, keep_last]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        keep_last:
+          type: integer
+
+    NodeHeartbeatRequest:
+      type: object
+      required: [id, active_apps]
+      properties:
+        id:
+          type: string
+        active_apps:
+          type: integer
+
+    ReleaseColor:
+      type: string
+      enum: [blue, green]
+
+    ReleaseRecord:
+      type: object
+      required: [release_id, color, upstream, deployed_at]
+      properties:
+        release_id:
+          type: string
+        color:
+          $ref: "#/components/schemas/ReleaseColor"
+        upstream:
+          type: string
+        deployed_at:
+          type: string
+          format: date-time
+
+    RouteEntry:
+      type: object
+      required:
+        - org_id
+        - app_name
+        - domain
+        - active_color
+        - active_release_id
+        - active_upstream
+        - standby_color
+        - standby_release_id
+        - standby_upstream
+        - halted
+        - updated_at
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        domain:
+          type: string
+        active_color:
+          $ref: "#/components/schemas/ReleaseColor"
+        active_release_id:
+          type: string
+        active_upstream:
+          type: string
+        standby_color:
+          $ref: "#/components/schemas/ReleaseColor"
+        standby_release_id:
+          type: string
+        standby_upstream:
+          type: string
+        canary_weight:
+          type: integer
+        halted:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseRecord"
+
+    BudgetStatus:
+      type: string
+      enum: [ok, warning, hard_stop, resumed]
+
+    BudgetEvent:
+      type: object
+      required: [timestamp, status, current_usd, max_monthly_usd]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/BudgetStatus"
+        current_usd:
+          type: number
+          format: double
+        max_monthly_usd:
+          type: number
+          format: double
+
+    MonthlyArchive:
+      type: object
+      required: [billing_month, total_usd, max_monthly_usd, archived_at]
+      properties:
+        billing_month:
+          type: string
+        total_usd:
+          type: number
+          format: double
+        max_monthly_usd:
+          type: number
+          format: double
+        archived_at:
+          type: string
+          format: date-time
+
+    AppBudgetState:
+      type: object
+      required:
+        - org_id
+        - app_name
+        - max_monthly_usd
+        - alert_at_pct
+        - current_usd
+        - billing_month
+        - status
+        - halted
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        max_monthly_usd:
+          type: number
+          format: double
+        alert_at_pct:
+          type: number
+          format: double
+        current_usd:
+          type: number
+          format: double
+        billing_month:
+          type: string
+        status:
+          $ref: "#/components/schemas/BudgetStatus"
+        halted:
+          type: boolean
+        alert_sent:
+          type: boolean
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/BudgetEvent"
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/MonthlyArchive"
+
+    OrgSpendSummary:
+      type: object
+      required:
+        - org_id
+        - total_spend_usd
+        - max_monthly_usd
+        - app_count
+        - halted_apps
+        - exceeded
+      properties:
+        org_id:
+          type: string
+        total_spend_usd:
+          type: number
+          format: double
+        max_monthly_usd:
+          type: number
+          format: double
+        app_count:
+          type: integer
+        halted_apps:
+          type: integer
+        exceeded:
+          type: boolean
+
+    SnapshotMetadata:
+      type: object
+      required: [org_id, app_name, generation, size_bytes, sha256, synced_at]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        generation:
+          type: integer
+        size_bytes:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        synced_at:
+          type: string
+          format: date-time
+
+    CgroupLimits:
+      type: object
+      required: [org_id, app_name, cpu_quota_us, cpu_period_us, memory_max_bytes, cgroup_path]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        cpu_quota_us:
+          type: integer
+        cpu_period_us:
+          type: integer
+        memory_max_bytes:
+          type: integer
+          format: int64
+        cgroup_path:
+          type: string
+
+    AppStatus:
+      type: object
+      required: [org_id, app_name, route, budget]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        route:
+          $ref: "#/components/schemas/RouteEntry"
+        budget:
+          $ref: "#/components/schemas/AppBudgetState"
+        last_snapshot:
+          $ref: "#/components/schemas/SnapshotMetadata"
+
+    DeploymentResult:
+      type: object
+      required:
+        - org_id
+        - app_name
+        - release_id
+        - active_color
+        - upstream
+        - deploy_time_ms
+        - cold_start_ms
+        - route
+        - cgroup
+        - budget
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        release_id:
+          type: string
+        active_color:
+          $ref: "#/components/schemas/ReleaseColor"
+        upstream:
+          type: string
+        deploy_time_ms:
+          type: integer
+          format: int64
+        cold_start_ms:
+          type: integer
+          format: int64
+        route:
+          $ref: "#/components/schemas/RouteEntry"
+        cgroup:
+          $ref: "#/components/schemas/CgroupLimits"
+          nullable: true
+        budget:
+          $ref: "#/components/schemas/AppBudgetState"
+        last_snapshot:
+          $ref: "#/components/schemas/SnapshotMetadata"
+
+    AuditEvent:
+      type: object
+      required: [id, timestamp, type, org_id, app_name]
+      properties:
+        id:
+          type: integer
+          format: int64
+        timestamp:
+          type: string
+          format: date-time
+        type:
+          type: string
+        org_id:
+          type: string
+        app_name:
+          type: string
+        release_id:
+          type: string
+        detail:
+          type: string
+
+    CanaryDecision:
+      type: object
+      required: [org_id, app_name, standby_upstream, healthy, action]
+      properties:
+        org_id:
+          type: string
+        app_name:
+          type: string
+        standby_upstream:
+          type: string
+        healthy:
+          type: boolean
+        action:
+          type: string
+          enum: [noop, promoted, rolled_back]
+        error:
+          type: string
+
+    WorkerNode:
+      type: object
+      required: [id, address, region, healthy, max_apps, active_apps, last_heartbeat]
+      properties:
+        id:
+          type: string
+        address:
+          type: string
+        region:
+          type: string
+        healthy:
+          type: boolean
+        max_apps:
+          type: integer
+        active_apps:
+          type: integer
+        last_heartbeat:
+          type: string
+          format: date-time
+
+    BackupManifest:
+      type: object
+      required: [version, created_at, org_id, app_name, status]
+      properties:
+        version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        org_id:
+          type: string
+        app_name:
+          type: string
+        snapshot:
+          $ref: "#/components/schemas/SnapshotMetadata"
+        status:
+          $ref: "#/components/schemas/AppStatus"
+
+    GitHubPushPayload:
+      type: object
+      required: [ref, after, repository]
+      properties:
+        ref:
+          type: string
+        after:
+          type: string
+        repository:
+          type: object
+          required: [full_name]
+          properties:
+            full_name:
+              type: string
+        pusher:
+          type: object
+          properties:
+            name:
+              type: string
+
+    GitPushEvent:
+      type: object
+      required: [repository, ref, branch, commit_sha, pusher]
+      properties:
+        repository:
+          type: string
+        ref:
+          type: string
+        branch:
+          type: string
+        commit_sha:
+          type: string
+        pusher:
+          type: string
+
+    HealthzResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ReadyzResponse:
+      type: object
+      required: [ready, apps, nodes]
+      properties:
+        ready:
+          type: boolean
+        apps:
+          type: integer
+        nodes:
+          type: integer
+
+paths:
+  /:
+    get:
+      summary: Serve SmallCloud dashboard UI
+      operationId: getRootUI
+      responses:
+        "200":
+          description: HTML dashboard page
+          content:
+            text/html:
+              schema:
+                type: string
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /ui:
+    get:
+      summary: Serve SmallCloud dashboard UI
+      operationId: getUI
+      responses:
+        "200":
+          description: HTML dashboard page
+          content:
+            text/html:
+              schema:
+                type: string
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Daemon is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthzResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: getReadyz
+      responses:
+        "200":
+          description: Daemon is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyzResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus text exposition format metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /webhooks/github:
+    post:
+      summary: Handle GitHub push webhook
+      operationId: postGitHubWebhook
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          description: HMAC-SHA256 signature (`sha256=<hex>`) computed with `SMALLCLOUD_GITHUB_WEBHOOK_SECRET`.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GitHubPushPayload"
+      responses:
+        "200":
+          description: Parsed GitHub push event
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitPushEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/deploy:
+    post:
+      summary: Deploy an application release
+      operationId: deployApp
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployRequest"
+      responses:
+        "200":
+          description: Deployment result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeploymentResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /v1/rollback:
+    post:
+      summary: Roll back an application to its standby release
+      operationId: rollbackApp
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackRequest"
+      responses:
+        "200":
+          description: Updated route entry after rollback
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/canary:
+    post:
+      summary: Set canary traffic weight for an application
+      operationId: setCanaryWeight
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanaryRequest"
+      responses:
+        "200":
+          description: Updated route entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/canary/reconcile:
+    post:
+      summary: Probe standby upstream and promote or roll back canary release
+      operationId: reconcileCanary
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanaryReconcileRequest"
+      responses:
+        "200":
+          description: Canary reconciliation decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanaryDecision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/apps:
+    get:
+      summary: List all deployed applications
+      operationId: listApps
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of application statuses
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [apps]
+                properties:
+                  apps:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    delete:
+      summary: Delete an application
+      operationId: deleteApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: app
+          in: query
+          required: false
+          description: Application slug (falls back to `app_name` if omitted).
+          schema:
+            type: string
+        - name: app_name
+          in: query
+          required: false
+          description: Application slug used if `app` is omitted.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deletion confirmation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, org_id, app_name]
+                properties:
+                  deleted:
+                    type: boolean
+                  org_id:
+                    type: string
+                  app_name:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/status:
+    get:
+      summary: Get status for a single application
+      operationId: getAppStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: app_name
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Application status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/logs:
+    get:
+      summary: Retrieve application logs
+      operationId: getAppLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: app
+          in: query
+          required: false
+          description: Application slug (falls back to `app_name` if omitted).
+          schema:
+            type: string
+        - name: app_name
+          in: query
+          required: false
+          description: Application slug used if `app` is omitted.
+          schema:
+            type: string
+        - name: tail
+          in: query
+          required: false
+          description: Non-negative number of trailing log lines to return.
+          schema:
+            type: integer
+            minimum: 0
+        - name: release_id
+          in: query
+          required: false
+          description: Release ID to inspect; defaults to the active release.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Application log output
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [org_id, app_name, release_id, logs]
+                properties:
+                  org_id:
+                    type: string
+                  app_name:
+                    type: string
+                  release_id:
+                    type: string
+                  logs:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /v1/events:
+    get:
+      summary: List audit events
+      operationId: listEvents
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: app
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Filtered audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/meter:
+    post:
+      summary: Record spend or update monthly budget for an application
+      operationId: meterApp
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MeterRequest"
+      responses:
+        "200":
+          description: Updated application budget state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppBudgetState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: Monthly spend cap or org quota exceeded; returns current AppBudgetState.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppBudgetState"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/org-quota:
+    get:
+      summary: Get organization spend summary and quota
+      operationId: getOrgQuota
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Organization spend summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgSpendSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      summary: Set organization monthly spend quota
+      operationId: setOrgQuota
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgQuotaRequest"
+      responses:
+        "200":
+          description: Updated organization spend summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgSpendSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/prune:
+    post:
+      summary: Prune old SQLite replica snapshots
+      operationId: pruneSnapshots
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PruneRequest"
+      responses:
+        "200":
+          description: Number of pruned snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pruned]
+                properties:
+                  pruned:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/rollover:
+    post:
+      summary: Roll over monthly billing budgets for all apps
+      operationId: rolloverBudgets
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RolloverRequest"
+      responses:
+        "200":
+          description: Rollover summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rolled_over, month]
+                properties:
+                  rolled_over:
+                    type: integer
+                  month:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/backup:
+    get:
+      summary: Export a gzipped tar backup bundle for an application
+      operationId: exportBackup
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: app
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Backup archive (`tar.gz`)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/restore:
+    post:
+      summary: Restore an application from a backup archive
+      operationId: restoreBackup
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Restored backup manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupManifest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/nodes/register:
+    post:
+      summary: Register a worker node
+      operationId: registerNode
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkerNode"
+      responses:
+        "200":
+          description: Registered worker node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerNode"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/nodes/heartbeat:
+    post:
+      summary: Record a worker node heartbeat
+      operationId: heartbeatNode
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeHeartbeatRequest"
+      responses:
+        "200":
+          description: Updated worker node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerNode"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/nodes:
+    get:
+      summary: List all registered worker nodes
+      operationId: listNodes
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of worker nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes]
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WorkerNode"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    delete:
+      summary: Remove a worker node
+      operationId: deleteNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Node removal confirmation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, id]
+                properties:
+                  deleted:
+                    type: boolean
+                  id:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/nodes/select:
+    get:
+      summary: Select a healthy worker node with available capacity
+      operationId: selectNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: region
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Selected worker node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerNode"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"

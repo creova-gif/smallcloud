@@ -187,6 +187,7 @@ for i in 1 2 3 4 5 6 7; do /tmp/smallcloud-bin eval; done
 
 - [ADR-001: SmallCloud Architecture Decision Record](docs/adr/001-small-software-architecture.md)
 - [Threat Model](docs/THREAT_MODEL.md)
+- [OpenAPI 3.1 Specification](docs/openapi.yaml)
 - [Contributing Guide](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 

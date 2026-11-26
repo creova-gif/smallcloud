@@ -250,13 +250,13 @@ func (c *DaemonClient) DeleteApp(ctx context.Context, orgID, appName string) err
 
 func (c *DaemonClient) SetCanaryWeight(ctx context.Context, orgID, appName string, standbyPct int) (daemon.RouteEntry, error) {
 	req := struct {
-		OrgID      string `json:"org_id"`
-		AppName    string `json:"app_name"`
-		StandbyPct int    `json:"standby_pct"`
+		OrgID        string `json:"org_id"`
+		AppName      string `json:"app_name"`
+		CanaryWeight int    `json:"canary_weight"`
 	}{
-		OrgID:      orgID,
-		AppName:    appName,
-		StandbyPct: standbyPct,
+		OrgID:        orgID,
+		AppName:      appName,
+		CanaryWeight: standbyPct,
 	}
 	var out daemon.RouteEntry
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/canary", req, &out); err != nil {

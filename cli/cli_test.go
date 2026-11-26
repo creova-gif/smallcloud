@@ -873,9 +873,9 @@ func TestCLIRemoteCanaryLogsOrgQuotaAndPrune(t *testing.T) {
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/canary":
 			var req struct {
-				OrgID      string `json:"org_id"`
-				AppName    string `json:"app_name"`
-				StandbyPct int    `json:"standby_pct"`
+				OrgID        string `json:"org_id"`
+				AppName      string `json:"app_name"`
+				CanaryWeight int    `json:"canary_weight"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			_ = json.NewEncoder(w).Encode(daemon.RouteEntry{
@@ -883,7 +883,7 @@ func TestCLIRemoteCanaryLogsOrgQuotaAndPrune(t *testing.T) {
 				AppName:          req.AppName,
 				ActiveReleaseID:  "v2.0.0",
 				StandbyReleaseID: "v1.0.0",
-				CanaryWeight:     req.StandbyPct,
+				CanaryWeight:     req.CanaryWeight,
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/org-quota":
 			var req struct {
