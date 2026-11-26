@@ -59,18 +59,49 @@ func (a HTTPAdminApplier) ApplyConfig(_ string, caddyfile string) error {
 	return nil
 }
 
+type ReleaseRecord struct {
+	ReleaseID  string       `json:"release_id"`
+	Color      ReleaseColor `json:"color"`
+	Upstream   string       `json:"upstream"`
+	DeployedAt time.Time    `json:"deployed_at"`
+}
+
+const maxReleaseHistory = 5
+
 type RouteEntry struct {
-	OrgID            string       `json:"org_id"`
-	AppName          string       `json:"app_name"`
-	Domain           string       `json:"domain"`
-	ActiveColor      ReleaseColor `json:"active_color"`
-	ActiveReleaseID  string       `json:"active_release_id"`
-	ActiveUpstream   string       `json:"active_upstream"`
-	StandbyColor     ReleaseColor `json:"standby_color"`
-	StandbyReleaseID string       `json:"standby_release_id"`
-	StandbyUpstream  string       `json:"standby_upstream"`
-	Halted           bool         `json:"halted"`
-	UpdatedAt        time.Time    `json:"updated_at"`
+	OrgID            string          `json:"org_id"`
+	AppName          string          `json:"app_name"`
+	Domain           string          `json:"domain"`
+	ActiveColor      ReleaseColor    `json:"active_color"`
+	ActiveReleaseID  string          `json:"active_release_id"`
+	ActiveUpstream   string          `json:"active_upstream"`
+	StandbyColor     ReleaseColor    `json:"standby_color"`
+	StandbyReleaseID string          `json:"standby_release_id"`
+	StandbyUpstream  string          `json:"standby_upstream"`
+	Halted           bool            `json:"halted"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	History          []ReleaseRecord `json:"history,omitempty"`
+}
+
+func appendReleaseHistory(history []ReleaseRecord, rec ReleaseRecord) []ReleaseRecord {
+	next := make([]ReleaseRecord, 0, len(history)+1)
+	next = append(next, history...)
+	next = append(next, rec)
+	if len(next) > maxReleaseHistory {
+		next = next[len(next)-maxReleaseHistory:]
+	}
+	out := make([]ReleaseRecord, len(next))
+	copy(out, next)
+	return out
+}
+
+func cloneRouteEntry(entry RouteEntry) RouteEntry {
+	if entry.History != nil {
+		hist := make([]ReleaseRecord, len(entry.History))
+		copy(hist, entry.History)
+		entry.History = hist
+	}
+	return entry
 }
 
 type CaddyRouter struct {
@@ -132,6 +163,12 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 			ActiveReleaseID: releaseID,
 			ActiveUpstream:  upstream,
 			UpdatedAt:       now,
+			History: appendReleaseHistory(nil, ReleaseRecord{
+				ReleaseID:  releaseID,
+				Color:      ColorBlue,
+				Upstream:   upstream,
+				DeployedAt: now,
+			}),
 		}
 	} else {
 		nextColor := ColorGreen
@@ -150,6 +187,12 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 			StandbyUpstream:  curr.ActiveUpstream,
 			Halted:           false,
 			UpdatedAt:        now,
+			History: appendReleaseHistory(curr.History, ReleaseRecord{
+				ReleaseID:  releaseID,
+				Color:      nextColor,
+				Upstream:   upstream,
+				DeployedAt: now,
+			}),
 		}
 	}
 
@@ -162,7 +205,7 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 	}
 
 	r.routes[key] = &next
-	return next, nil
+	return cloneRouteEntry(next), nil
 }
 
 var (
@@ -190,12 +233,19 @@ func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
 		return RouteEntry{}, fmt.Errorf("%w for %s/%s", ErrNoStandbyRelease, orgID, appName)
 	}
 
+	now := time.Now().UTC()
 	prevCopy := *curr
 	next := *curr
 	next.ActiveColor, next.StandbyColor = curr.StandbyColor, curr.ActiveColor
 	next.ActiveReleaseID, next.StandbyReleaseID = curr.StandbyReleaseID, curr.ActiveReleaseID
 	next.ActiveUpstream, next.StandbyUpstream = curr.StandbyUpstream, curr.ActiveUpstream
-	next.UpdatedAt = time.Now().UTC()
+	next.UpdatedAt = now
+	next.History = appendReleaseHistory(curr.History, ReleaseRecord{
+		ReleaseID:  next.ActiveReleaseID,
+		Color:      next.ActiveColor,
+		Upstream:   next.ActiveUpstream,
+		DeployedAt: now,
+	})
 
 	if err := r.applier.ApplyConfig(next.Domain, RenderCaddyfile(next, "")); err != nil {
 		r.routes[key] = &prevCopy
@@ -203,7 +253,7 @@ func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
 	}
 
 	r.routes[key] = &next
-	return next, nil
+	return cloneRouteEntry(next), nil
 }
 
 func (r *CaddyRouter) HaltRoute(orgID, appName string) {
@@ -243,7 +293,7 @@ func (r *CaddyRouter) GetRoute(orgID, appName string) (RouteEntry, bool) {
 	if !exists {
 		return RouteEntry{}, false
 	}
-	return *curr, true
+	return cloneRouteEntry(*curr), true
 }
 
 func (r *CaddyRouter) SnapshotRoutes() map[string]*RouteEntry {
@@ -252,7 +302,7 @@ func (r *CaddyRouter) SnapshotRoutes() map[string]*RouteEntry {
 
 	out := make(map[string]*RouteEntry, len(r.routes))
 	for k, v := range r.routes {
-		cp := *v
+		cp := cloneRouteEntry(*v)
 		out[k] = &cp
 	}
 	return out
@@ -267,14 +317,14 @@ func (r *CaddyRouter) RestoreRoutes(routes map[string]*RouteEntry) {
 		if v == nil {
 			continue
 		}
-		cp := *v
+		cp := cloneRouteEntry(*v)
 		r.routes[k] = &cp
 	}
 }
 
 func RenderCaddyfile(entry RouteEntry, healthPath string) string {
 	if entry.Halted {
-		return fmt.Sprintf("%s {\n\trespond \"402 Payment Required: SmallCloud monthly spend cap reached\" 402\n}\n", entry.Domain)
+		return fmt.Sprintf("%s {\n\theader Retry-After 3600\n\trespond \"402 Payment Required: SmallCloud monthly spend cap reached\" 402\n}\n", entry.Domain)
 	}
 	if healthPath == "" {
 		healthPath = "/healthz"

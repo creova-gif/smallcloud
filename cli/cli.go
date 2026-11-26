@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -242,7 +243,7 @@ sync_ms = 1000
 	return writeJSON(stdout, map[string]string{"initialized": tomlPath, "app_name": appName})
 }
 
-func runBudget(args []string, d *daemon.Daemon, statePath string, stdout io.Writer) error {
+func runBudget(args []string, d *daemon.Daemon, client *DaemonClient, statePath string, stdout io.Writer) error {
 	if len(args) > 0 && args[0] == "set" {
 		args = args[1:]
 	}
@@ -267,6 +268,22 @@ func runBudget(args []string, d *daemon.Daemon, statePath string, stdout io.Writ
 	cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
 	if err != nil {
 		return err
+	}
+
+	if client != nil {
+		ctx := context.Background()
+		if newMax != nil {
+			st, err := client.SetMaxBudget(ctx, cfg.App.OrgID, cfg.App.Name, *newMax)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, st)
+		}
+		st, err := client.Status(ctx, cfg.App.OrgID, cfg.App.Name)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, st.Budget)
 	}
 
 	if newMax != nil {
@@ -373,11 +390,17 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		return ServeWithContext(ctx, addr, stateDir, stdout)
 	}
 
-	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	var d *daemon.Daemon
+	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if cmd != "eval" {
-		if err := d.LoadState(statePath); err != nil {
-			return err
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget") {
+		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
+	} else {
+		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+		if cmd != "eval" {
+			if err := d.LoadState(statePath); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -406,6 +429,13 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if client != nil {
+			res, err := client.Deploy(context.Background(), manifest.Config, rel)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, res)
+		}
 		res, err := d.Deploy(manifest.Config, rel)
 		if err != nil {
 			return err
@@ -423,6 +453,13 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		manifest, err := PackageApp(dir)
 		if err != nil {
 			return err
+		}
+		if client != nil {
+			rolled, err := client.Rollback(context.Background(), manifest.Config.App.OrgID, manifest.Config.App.Name)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, rolled)
 		}
 		rolled, err := d.Rollback(manifest.Config.App.OrgID, manifest.Config.App.Name)
 		if err != nil {
@@ -442,6 +479,13 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if client != nil {
+			st, err := client.Status(context.Background(), cfg.App.OrgID, cfg.App.Name)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, st)
+		}
 		st, err := d.Status(cfg.App.OrgID, cfg.App.Name)
 		if err != nil {
 			return err
@@ -449,7 +493,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		return writeJSON(stdout, st)
 
 	case "budget":
-		return runBudget(args[1:], d, statePath, stdout)
+		return runBudget(args[1:], d, client, statePath, stdout)
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)

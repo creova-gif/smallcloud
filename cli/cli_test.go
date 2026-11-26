@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,5 +152,74 @@ func TestCLIServeGracefulShutdownAndPersist(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "state.json")); err != nil {
 		t.Fatalf("expected state.json persisted on shutdown: %v", err)
+	}
+}
+
+func TestCLIRemoteDaemonEnvRouting(t *testing.T) {
+	daemonDir := t.TempDir()
+	d := daemon.NewDaemon(filepath.Join(daemonDir, "cgroups"), filepath.Join(daemonDir, "replicas"))
+	const token = "cli-remote-secret"
+	srv := httptest.NewServer(d.HandlerWithAuth(token))
+	defer srv.Close()
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+
+	localStateDir := t.TempDir()
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+
+	var out bytes.Buffer
+	if err := Run([]string{"deploy", templateDir, "v2.0.0"}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli deploy failed: %v", err)
+	}
+	var res daemon.DeploymentResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal remote deploy: %v", err)
+	}
+	if res.Route.ActiveReleaseID != "v2.0.0" {
+		t.Fatalf("expected active release v2.0.0, got %+v", res.Route)
+	}
+	if _, err := os.Stat(filepath.Join(localStateDir, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no local state.json when routing to remote daemon, got %v", err)
+	}
+
+	out.Reset()
+	if err := Run([]string{"budget", "set", templateDir, "19.95"}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli budget set failed: %v", err)
+	}
+	var bState daemon.AppBudgetState
+	if err := json.Unmarshal(out.Bytes(), &bState); err != nil {
+		t.Fatalf("unmarshal remote budget: %v", err)
+	}
+	if bState.MaxMonthlyUSD != 19.95 {
+		t.Fatalf("expected max_monthly_usd 19.95, got %v", bState.MaxMonthlyUSD)
+	}
+
+	out.Reset()
+	if err := Run([]string{"status", templateDir}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli status failed: %v", err)
+	}
+	var st daemon.AppStatus
+	if err := json.Unmarshal(out.Bytes(), &st); err != nil {
+		t.Fatalf("unmarshal remote status: %v", err)
+	}
+	if st.Route.ActiveReleaseID != "v2.0.0" || st.Budget.MaxMonthlyUSD != 19.95 {
+		t.Fatalf("unexpected remote status: %+v", st)
+	}
+
+	out.Reset()
+	if err := Run([]string{"deploy", templateDir, "v2.1.0"}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli second deploy failed: %v", err)
+	}
+	out.Reset()
+	if err := Run([]string{"rollback", templateDir}, localStateDir, &out); err != nil {
+		t.Fatalf("remote cli rollback failed: %v", err)
+	}
+	var rolled daemon.RouteEntry
+	if err := json.Unmarshal(out.Bytes(), &rolled); err != nil {
+		t.Fatalf("unmarshal remote rollback: %v", err)
+	}
+	if rolled.ActiveReleaseID != "v2.0.0" {
+		t.Fatalf("expected rollback to v2.0.0, got %+v", rolled)
 	}
 }
