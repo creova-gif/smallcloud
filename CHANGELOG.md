@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Hardening, Observability & Disaster Recovery
+- **HTTP Security Middleware**: Added token-bucket `RateLimitMiddleware`, `X-Request-ID` propagation, and HTTP security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cache-Control`).
+- **Readiness Endpoint**: Added `GET /readyz` to verify daemon readiness separately from `/healthz`.
+- **Worker Pool Persistence**: Persisted `WorkerPool` node state across daemon restarts.
+- **Disaster Recovery Backup Bundles**: Added `ExportBackupBundle`, `VerifyBackupBundle`, and `RestoreBackupBundle` in `daemon/backup.go` for portable `.tar.gz` app and SQLite replica archives with SHA-256 verification.
+- **Unsafe Linker `[env]` Blocking**: Blocked unsafe dynamic linker environment variables (e.g. `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`) in `smallcloud.toml` `[env]` validation.
+- **Backup & Snapshot CLI Commands**: Added `smallcloud verify-snapshot`, `smallcloud backup`, and `smallcloud restore-bundle` CLI subcommands.
+- **Structured Access Logging**: Added structured `log/slog` HTTP access logging in the control-plane daemon.
+
 ### Wave 7 — Distributed Edge, Zero-Trust Mesh & Developer Platform
 - **GitHub Webhook Git-Push Deployments**: HMAC-SHA256 webhook signature verification (`VerifyGitHubSignature`) and push event parsing (`ParseGitHubPushEvent`) in `daemon/gitops.go`.
 - **Interactive App Scaffolding & Plugin Templates**: Expanded `smallcloud init` template scaffolding across FastAPI, Node.js, and Go runtimes.

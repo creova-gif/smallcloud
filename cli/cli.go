@@ -485,7 +485,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|verify-snapshot|nodes|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|verify-snapshot|backup|restore-bundle|nodes|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -910,6 +910,39 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			return err
 		}
 		return writeJSON(stdout, meta)
+
+	case "backup":
+		if len(args) < 2 {
+			return errors.New("usage: smallcloud backup [dir] <dest.tar.gz>")
+		}
+		dir := "."
+		destPath := args[1]
+		if len(args) >= 3 {
+			dir = args[1]
+			destPath = args[2]
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		manifest, err := daemon.ExportBackupBundle(d, cfg.App.OrgID, cfg.App.Name, destPath)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, manifest)
+
+	case "restore-bundle":
+		if len(args) < 2 {
+			return errors.New("usage: smallcloud restore-bundle <bundle.tar.gz>")
+		}
+		manifest, err := daemon.RestoreBackupBundle(d, args[1])
+		if err != nil {
+			return err
+		}
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, manifest)
 
 	case "nodes":
 		if client == nil {

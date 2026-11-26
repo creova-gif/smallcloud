@@ -1374,3 +1374,40 @@ func TestServerMiddlewareHeadersRequestIDAndMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestRateLimitMiddlewareOnServer(t *testing.T) {
+	t.Setenv("SMALLCLOUD_RATE_LIMIT", "2")
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("")
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+		req.RemoteAddr = "198.51.100.5:4100"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	req3.RemoteAddr = "198.51.100.5:4101"
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on 3rd request, got %d: %s", rec3.Code, rec3.Body.String())
+	}
+	if rec3.Header().Get("Retry-After") != "60" {
+		t.Fatalf("expected Retry-After 60, got %q", rec3.Header().Get("Retry-After"))
+	}
+
+	for _, probePath := range []string{"/healthz", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, probePath, nil)
+		req.RemoteAddr = "198.51.100.5:4102"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on %s, got %d: %s", probePath, rec.Code, rec.Body.String())
+		}
+	}
+}

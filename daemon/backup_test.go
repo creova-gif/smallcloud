@@ -249,3 +249,115 @@ func readTarGzEntries(t *testing.T, path string) map[string][]byte {
 	}
 	return out
 }
+
+func TestBackupRestoreRoundtripZeroDataLoss(t *testing.T) {
+	dA := NewDaemon(t.TempDir(), t.TempDir())
+	cfg := sampleConfig()
+
+	if _, err := dA.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	sqliteSrc := filepath.Join(t.TempDir(), "crm.db")
+	payload := append([]byte("SQLite format 3\x00"), bytes.Repeat([]byte{0x42, 0x99, 0x00, 0x13}, 1024)...)
+	if err := os.WriteFile(sqliteSrc, payload, 0o600); err != nil {
+		t.Fatalf("write sqlite src: %v", err)
+	}
+
+	syncedMeta, err := dA.Storage().SyncWAL(cfg.App.OrgID, cfg.App.Name, sqliteSrc)
+	if err != nil {
+		t.Fatalf("SyncWAL: %v", err)
+	}
+
+	bundlePath := filepath.Join(t.TempDir(), "roundtrip.tar.gz")
+	exported, err := ExportBackupBundle(dA, cfg.App.OrgID, cfg.App.Name, bundlePath)
+	if err != nil {
+		t.Fatalf("ExportBackupBundle: %v", err)
+	}
+
+	dB := NewDaemon(t.TempDir(), t.TempDir())
+	restoredManifest, err := RestoreBackupBundle(dB, bundlePath)
+	if err != nil {
+		t.Fatalf("RestoreBackupBundle: %v", err)
+	}
+
+	if restoredManifest.OrgID != exported.OrgID || restoredManifest.AppName != exported.AppName {
+		t.Fatalf("restored tenant = %s/%s, want %s/%s", restoredManifest.OrgID, restoredManifest.AppName, exported.OrgID, exported.AppName)
+	}
+	if restoredManifest.Snapshot == nil || restoredManifest.Snapshot.SHA256 != syncedMeta.SHA256 {
+		t.Fatalf("restored snapshot = %+v, want sha256 %s", restoredManifest.Snapshot, syncedMeta.SHA256)
+	}
+
+	recoveredPath := filepath.Join(t.TempDir(), "recovered.db")
+	recoveredMeta, err := dB.Storage().Restore(cfg.App.OrgID, cfg.App.Name, recoveredPath)
+	if err != nil {
+		t.Fatalf("dB.Storage().Restore: %v", err)
+	}
+	if recoveredMeta.SHA256 != syncedMeta.SHA256 {
+		t.Fatalf("recovered sha256 = %s, want %s", recoveredMeta.SHA256, syncedMeta.SHA256)
+	}
+
+	recoveredBytes, err := os.ReadFile(recoveredPath)
+	if err != nil {
+		t.Fatalf("read recovered db: %v", err)
+	}
+	if !bytes.Equal(recoveredBytes, payload) {
+		t.Fatalf("recovered db bytes differ from original payload (got %d bytes, want %d bytes)", len(recoveredBytes), len(payload))
+	}
+
+	events := dB.Audit().List(cfg.App.OrgID, cfg.App.Name, 10)
+	if len(events) != 1 || events[0].Type != "backup_restored" {
+		t.Fatalf("audit events = %+v, want single backup_restored event", events)
+	}
+}
+
+func TestBackupRestoreRejectsCorruptBundle(t *testing.T) {
+	dA := NewDaemon(t.TempDir(), t.TempDir())
+	cfg := sampleConfig()
+	if _, err := dA.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	sqliteSrc := filepath.Join(t.TempDir(), "crm.db")
+	if err := os.WriteFile(sqliteSrc, []byte("original-sqlite-bytes"), 0o600); err != nil {
+		t.Fatalf("write sqlite src: %v", err)
+	}
+	if _, err := dA.Storage().SyncWAL(cfg.App.OrgID, cfg.App.Name, sqliteSrc); err != nil {
+		t.Fatalf("SyncWAL: %v", err)
+	}
+
+	validBundle := filepath.Join(t.TempDir(), "valid.tar.gz")
+	if _, err := ExportBackupBundle(dA, cfg.App.OrgID, cfg.App.Name, validBundle); err != nil {
+		t.Fatalf("ExportBackupBundle: %v", err)
+	}
+
+	if _, err := RestoreBackupBundle(nil, validBundle); err == nil {
+		t.Fatal("expected error for nil daemon")
+	}
+
+	dB := NewDaemon(t.TempDir(), t.TempDir())
+
+	corruptGzip := filepath.Join(t.TempDir(), "corrupt.tar.gz")
+	if err := os.WriteFile(corruptGzip, []byte("corrupt-data"), 0o600); err != nil {
+		t.Fatalf("write corrupt gzip: %v", err)
+	}
+	if _, err := RestoreBackupBundle(dB, corruptGzip); err == nil {
+		t.Fatal("expected error for corrupt gzip bundle")
+	}
+
+	entries := readTarGzEntries(t, validBundle)
+	entries["replica.db"] = []byte("tampered-bytes")
+	tamperedBundle := filepath.Join(t.TempDir(), "tampered.tar.gz")
+	writeCustomTarGz(t, tamperedBundle, entries)
+
+	if _, err := RestoreBackupBundle(dB, tamperedBundle); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("RestoreBackupBundle tampered err = %v, want ErrChecksumMismatch", err)
+	}
+
+	if dB.Storage().HasReplica(cfg.App.OrgID, cfg.App.Name) {
+		t.Fatal("expected local replica storage to remain untouched after rejected bundle")
+	}
+	if events := dB.Audit().List(cfg.App.OrgID, cfg.App.Name, 10); len(events) != 0 {
+		t.Fatalf("expected no audit events on rejected restore, got %+v", events)
+	}
+}

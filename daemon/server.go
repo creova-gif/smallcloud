@@ -108,10 +108,24 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 		})
 	}
 
+	handler = RateLimitMiddleware(NewRateLimiter(rateLimitPerMinute(), time.Minute), nil)(handler)
 	handler = metrics.Middleware(handler)
 	handler = SecurityHeadersMiddleware(handler)
 	handler = RequestIDMiddleware(handler)
 	return handler
+}
+
+func rateLimitPerMinute() int {
+	const defaultRateLimit = 600
+	raw := strings.TrimSpace(os.Getenv("SMALLCLOUD_RATE_LIMIT"))
+	if raw == "" {
+		return defaultRateLimit
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return defaultRateLimit
+	}
+	return v
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {

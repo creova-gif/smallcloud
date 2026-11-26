@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -156,5 +157,66 @@ func TestHTTPMetricsMiddleware(t *testing.T) {
 	}
 	if got := metrics.BudgetExceededTotal.Load(); got != 1 {
 		t.Fatalf("expected BudgetExceededTotal=1, got %d", got)
+	}
+}
+
+func TestRateLimitMiddleware(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	limiter := NewRateLimiter(2, time.Minute)
+	h := RateLimitMiddleware(limiter, func() time.Time { return now })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+		req.RemoteAddr = fmt.Sprintf("192.0.2.10:%d", 1000+i)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d", i+1, rec.Code)
+		}
+	}
+
+	reqLimited := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	reqLimited.RemoteAddr = "192.0.2.10:2000"
+	recLimited := httptest.NewRecorder()
+	h.ServeHTTP(recLimited, reqLimited)
+	if recLimited.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", recLimited.Code)
+	}
+	if recLimited.Header().Get("Retry-After") != "60" {
+		t.Fatalf("expected Retry-After 60, got %q", recLimited.Header().Get("Retry-After"))
+	}
+	if ct := recLimited.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(recLimited.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("unmarshal 429 body: %v", err)
+	}
+	if errBody["error"] != "rate limit exceeded" {
+		t.Fatalf("expected error 'rate limit exceeded', got %q", errBody["error"])
+	}
+
+	for _, exemptPath := range []string{"/healthz", "/readyz"} {
+		for i := 0; i < 5; i++ {
+			req := httptest.NewRequest(http.MethodGet, exemptPath, nil)
+			req.RemoteAddr = "192.0.2.10:3000"
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s request %d: expected 200, got %d", exemptPath, i+1, rec.Code)
+			}
+		}
+	}
+
+	passThrough := RateLimitMiddleware(nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	reqNil := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	recNil := httptest.NewRecorder()
+	passThrough.ServeHTTP(recNil, reqNil)
+	if recNil.Code != http.StatusOK {
+		t.Fatalf("expected 200 when limiter is nil, got %d", recNil.Code)
 	}
 }

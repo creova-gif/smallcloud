@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -174,4 +175,38 @@ func (m *HTTPMetrics) Middleware(next http.Handler) http.Handler {
 			m.BudgetExceededTotal.Add(1)
 		}
 	})
+}
+
+func RateLimitMiddleware(limiter *RateLimiter, nowFn func() time.Time) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			key := r.RemoteAddr
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				key = host
+			}
+
+			now := time.Now()
+			if nowFn != nil {
+				now = nowFn()
+			}
+
+			if !limiter.Allow(key, now) {
+				w.Header().Set("Retry-After", "60")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error": "rate limit exceeded"}`))
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }

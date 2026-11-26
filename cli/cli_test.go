@@ -928,3 +928,72 @@ func TestCLIVerifySnapshot(t *testing.T) {
 		t.Fatalf("verified metadata %+v does not match synced %+v", meta, synced)
 	}
 }
+
+func TestCLIBackupAndRestoreBundle(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	srcStateDir := t.TempDir()
+
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, srcStateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	d := daemon.NewDaemon(filepath.Join(srcStateDir, "cgroups"), filepath.Join(srcStateDir, "replicas"))
+	dbFile := filepath.Join(t.TempDir(), "app.db")
+	payload := []byte("SQLite format 3\x00smallcloud-backup-restore-test")
+	if err := os.WriteFile(dbFile, payload, 0o600); err != nil {
+		t.Fatalf("write db file: %v", err)
+	}
+	synced, err := d.Storage().SyncWAL("org-indie-default", "fastapi-starter", dbFile)
+	if err != nil {
+		t.Fatalf("SyncWAL failed: %v", err)
+	}
+
+	if err := Run([]string{"backup"}, srcStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected backup with missing args to fail")
+	}
+
+	bundlePath := filepath.Join(t.TempDir(), "fastapi-backup.tar.gz")
+	var backupOut bytes.Buffer
+	if err := Run([]string{"backup", templateDir, bundlePath}, srcStateDir, &backupOut); err != nil {
+		t.Fatalf("backup failed: %v", err)
+	}
+	var backupManifest daemon.BackupManifest
+	if err := json.Unmarshal(backupOut.Bytes(), &backupManifest); err != nil {
+		t.Fatalf("unmarshal backup manifest: %v", err)
+	}
+	if backupManifest.OrgID != "org-indie-default" || backupManifest.AppName != "fastapi-starter" {
+		t.Fatalf("unexpected backup manifest tenant: %+v", backupManifest)
+	}
+	if backupManifest.Snapshot == nil || backupManifest.Snapshot.SHA256 != synced.SHA256 {
+		t.Fatalf("expected backup snapshot sha256 %s, got %+v", synced.SHA256, backupManifest.Snapshot)
+	}
+
+	dstStateDir := t.TempDir()
+	if err := Run([]string{"restore-bundle"}, dstStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected restore-bundle with missing args to fail")
+	}
+
+	var restoreOut bytes.Buffer
+	if err := Run([]string{"restore-bundle", bundlePath}, dstStateDir, &restoreOut); err != nil {
+		t.Fatalf("restore-bundle failed: %v", err)
+	}
+	var restoredManifest daemon.BackupManifest
+	if err := json.Unmarshal(restoreOut.Bytes(), &restoredManifest); err != nil {
+		t.Fatalf("unmarshal restore manifest: %v", err)
+	}
+	if restoredManifest.OrgID != "org-indie-default" || restoredManifest.AppName != "fastapi-starter" {
+		t.Fatalf("unexpected restored manifest tenant: %+v", restoredManifest)
+	}
+
+	var verifyOut bytes.Buffer
+	if err := Run([]string{"verify-snapshot", templateDir}, dstStateDir, &verifyOut); err != nil {
+		t.Fatalf("verify-snapshot after restore-bundle failed: %v", err)
+	}
+	var meta daemon.SnapshotMetadata
+	if err := json.Unmarshal(verifyOut.Bytes(), &meta); err != nil {
+		t.Fatalf("unmarshal verify-snapshot metadata: %v", err)
+	}
+	if meta.SHA256 != synced.SHA256 || meta.SizeBytes != synced.SizeBytes {
+		t.Fatalf("verified metadata %+v does not match synced %+v", meta, synced)
+	}
+}

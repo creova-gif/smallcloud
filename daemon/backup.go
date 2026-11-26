@@ -281,3 +281,112 @@ func VerifyBackupBundle(bundlePath string) (BackupManifest, error) {
 
 	return manifest, nil
 }
+
+func RestoreBackupBundle(d *Daemon, bundlePath string) (BackupManifest, error) {
+	if d == nil {
+		return BackupManifest{}, errors.New("daemon is required")
+	}
+
+	manifest, err := VerifyBackupBundle(bundlePath)
+	if err != nil {
+		return BackupManifest{}, err
+	}
+
+	if manifest.Snapshot != nil {
+		targetDir := filepath.Join(d.Storage().ReplicaDir(), manifest.OrgID, manifest.AppName)
+		if err := extractReplicaFromBundle(bundlePath, targetDir); err != nil {
+			return BackupManifest{}, err
+		}
+		if _, err := d.Storage().VerifySnapshot(manifest.OrgID, manifest.AppName); err != nil {
+			return BackupManifest{}, err
+		}
+	}
+
+	detail := "no_replica"
+	if manifest.Snapshot != nil {
+		detail = fmt.Sprintf("sha256=%s", manifest.Snapshot.SHA256)
+	}
+	d.Audit().Record(AuditEvent{
+		Type:      "backup_restored",
+		OrgID:     manifest.OrgID,
+		AppName:   manifest.AppName,
+		ReleaseID: manifest.Status.Route.ActiveReleaseID,
+		Detail:    detail,
+	})
+
+	return manifest, nil
+}
+
+func extractReplicaFromBundle(bundlePath, targetDir string) error {
+	if err := os.MkdirAll(targetDir, 0o750); err != nil {
+		return fmt.Errorf("mkdir %q: %w", targetDir, err)
+	}
+
+	f, err := os.Open(bundlePath)
+	if err != nil {
+		return fmt.Errorf("open backup bundle %q: %w", bundlePath, err)
+	}
+	defer f.Close()
+
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("open gzip reader: %w", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			continue
+		}
+		if hdr.Name != "replica.db" && hdr.Name != "replica.db.sha256" {
+			continue
+		}
+		if err := writeAtomicFile(targetDir, filepath.Join(targetDir, hdr.Name), tr); err != nil {
+			return err
+		}
+	}
+
+	if err := gzr.Close(); err != nil {
+		return fmt.Errorf("verify gzip stream: %w", err)
+	}
+	return nil
+}
+
+func writeAtomicFile(dir, destPath string, r io.Reader) error {
+	tmp, err := os.CreateTemp(dir, ".tmp-restore-*")
+	if err != nil {
+		return fmt.Errorf("create temp file in %q: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		_ = os.Remove(tmpName)
+	}
+
+	if _, err := io.Copy(tmp, r); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp file %q: %w", destPath, err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("chmod temp file %q: %w", destPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp file %q: %w", destPath, err)
+	}
+	if err := os.Rename(tmpName, destPath); err != nil {
+		cleanup()
+		return fmt.Errorf("rename %q: %w", destPath, err)
+	}
+	return nil
+}
