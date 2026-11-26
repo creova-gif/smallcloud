@@ -40,6 +40,7 @@ type DaemonState struct {
 	Snapshots   map[string]*SnapshotMetadata `json:"snapshots"`
 	AppMeta     map[string]AppMeta           `json:"app_meta"`
 	AuditEvents []AuditEvent                 `json:"audit_events,omitempty"`
+	WorkerNodes []WorkerNode                 `json:"worker_nodes,omitempty"`
 }
 
 type DeploymentResult struct {
@@ -66,6 +67,7 @@ type Daemon struct {
 	runtime   ContainerRuntime
 	notifier  *WebhookNotifier
 	audit     *AuditLog
+	pool      *WorkerPool
 	seq       int
 	appMeta   map[string]AppMeta
 	snapshots map[string]*SnapshotMetadata
@@ -78,6 +80,7 @@ func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
 		router:    NewCaddyRouter(),
 		runtime:   NoopRuntime{},
 		audit:     NewAuditLog(defaultAuditMaxEvents),
+		pool:      NewWorkerPool(),
 		appMeta:   make(map[string]AppMeta),
 		snapshots: make(map[string]*SnapshotMetadata),
 	}
@@ -139,6 +142,21 @@ func (d *Daemon) Cgroups() *CgroupManager  { return d.cgroups }
 func (d *Daemon) Storage() *StorageManager { return d.storage }
 func (d *Daemon) Router() *CaddyRouter     { return d.router }
 func (d *Daemon) Audit() *AuditLog         { return d.audit }
+
+func (d *Daemon) WorkerPool() *WorkerPool {
+	d.metaMu.RLock()
+	p := d.pool
+	d.metaMu.RUnlock()
+	if p != nil {
+		return p
+	}
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
+	if d.pool == nil {
+		d.pool = NewWorkerPool()
+	}
+	return d.pool
+}
 
 func (d *Daemon) SetRuntime(rt ContainerRuntime) {
 	d.metaMu.Lock()
@@ -652,6 +670,17 @@ func (d *Daemon) LoadState(path string) error {
 	d.storage.RestoreGenerations(st.Generations)
 	d.audit.Restore(st.AuditEvents)
 
+	pool := d.WorkerPool()
+	pool.mu.Lock()
+	pool.nodes = make(map[string]WorkerNode, len(st.WorkerNodes))
+	for _, node := range st.WorkerNodes {
+		if strings.TrimSpace(node.ID) == "" {
+			continue
+		}
+		pool.nodes[node.ID] = node
+	}
+	pool.mu.Unlock()
+
 	d.metaMu.Lock()
 	d.appMeta = make(map[string]AppMeta, len(st.AppMeta))
 	for k, v := range st.AppMeta {
@@ -705,6 +734,7 @@ func (d *Daemon) SaveState(path string) error {
 		Snapshots:   snapCopy,
 		AppMeta:     metaCopy,
 		AuditEvents: d.audit.Snapshot(),
+		WorkerNodes: d.WorkerPool().ListNodes(),
 	}
 
 	data, err := json.MarshalIndent(st, "", "  ")

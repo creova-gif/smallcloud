@@ -291,6 +291,31 @@ func TestEnvValidationRejectsInvalidEntries(t *testing.T) {
 			env:     map[string]string{"GOOD_KEY": "bad\x00val"},
 			wantErr: "NUL byte",
 		},
+		{
+			name:    "dangerous LD_PRELOAD",
+			env:     map[string]string{"LD_PRELOAD": "/tmp/evil.so"},
+			wantErr: "forbidden",
+		},
+		{
+			name:    "dangerous ld_library_path lowercase",
+			env:     map[string]string{"ld_library_path": "/tmp/libs"},
+			wantErr: "forbidden",
+		},
+		{
+			name:    "dangerous DYLD_INSERT_LIBRARIES",
+			env:     map[string]string{"DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib"},
+			wantErr: "forbidden",
+		},
+		{
+			name:    "dangerous DYLD_LIBRARY_PATH mixed case",
+			env:     map[string]string{"Dyld_Library_Path": "/tmp/libs"},
+			wantErr: "forbidden",
+		},
+		{
+			name:    "dangerous LD_AUDIT",
+			env:     map[string]string{"LD_AUDIT": "/tmp/audit.so"},
+			wantErr: "forbidden",
+		},
 	}
 
 	for _, tc := range cases {

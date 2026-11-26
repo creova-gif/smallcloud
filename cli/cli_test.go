@@ -893,3 +893,38 @@ func TestCLIRemoteNodes(t *testing.T) {
 		t.Fatalf("expected 1 node, got %d", len(res.Nodes))
 	}
 }
+
+func TestCLIVerifySnapshot(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	stateDir := t.TempDir()
+
+	if err := Run([]string{"verify-snapshot", templateDir}, stateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected verify-snapshot to fail when no snapshot exists")
+	}
+
+	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	dbFile := filepath.Join(t.TempDir(), "app.db")
+	payload := []byte("SQLite format 3\x00smallcloud-verify-snapshot-test")
+	if err := os.WriteFile(dbFile, payload, 0o600); err != nil {
+		t.Fatalf("write db file: %v", err)
+	}
+	synced, err := d.Storage().SyncWAL("org-indie-default", "fastapi-starter", dbFile)
+	if err != nil {
+		t.Fatalf("SyncWAL failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := Run([]string{"verify-snapshot", templateDir}, stateDir, &out); err != nil {
+		t.Fatalf("verify-snapshot failed: %v", err)
+	}
+	var meta daemon.SnapshotMetadata
+	if err := json.Unmarshal(out.Bytes(), &meta); err != nil {
+		t.Fatalf("unmarshal SnapshotMetadata: %v", err)
+	}
+	if meta.OrgID != "org-indie-default" || meta.AppName != "fastapi-starter" {
+		t.Fatalf("unexpected metadata tenant: %+v", meta)
+	}
+	if meta.Generation != synced.Generation || meta.SizeBytes != synced.SizeBytes || meta.SHA256 != synced.SHA256 {
+		t.Fatalf("verified metadata %+v does not match synced %+v", meta, synced)
+	}
+}

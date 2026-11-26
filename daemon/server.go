@@ -11,13 +11,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
-
-var defaultPools sync.Map
 
 const maxRequestBodyBytes = 1 << 20
 
@@ -64,25 +61,20 @@ type nodeHeartbeatRequest struct {
 	ActiveApps int    `json:"active_apps"`
 }
 
-func (d *Daemon) workerPool() *WorkerPool {
-	if pool, ok := defaultPools.Load(d); ok {
-		return pool.(*WorkerPool)
-	}
-	pool := NewWorkerPool()
-	actual, _ := defaultPools.LoadOrStore(d, pool)
-	return actual.(*WorkerPool)
-}
-
 func (d *Daemon) Handler() http.Handler {
 	return d.HandlerWithAuth(os.Getenv("SMALLCLOUD_API_TOKEN"))
 }
 
 func (d *Daemon) HandlerWithAuth(token string) http.Handler {
+	metrics := &HTTPMetrics{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", d.handleUI)
 	mux.HandleFunc("GET /ui", d.handleUI)
 	mux.HandleFunc("GET /healthz", d.handleHealthz)
-	mux.HandleFunc("GET /metrics", d.handleMetrics)
+	mux.HandleFunc("GET /readyz", d.handleReadyz)
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		d.writeMetrics(w, metrics)
+	})
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
 	mux.HandleFunc("POST /v1/canary", d.handleCanary)
@@ -101,21 +93,25 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("GET /v1/nodes", d.handleListNodes)
 	mux.HandleFunc("POST /webhooks/github", d.handleGitHubWebhook)
 
-	if token == "" {
-		return mux
+	var handler http.Handler = mux
+	if token != "" {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/v1/") {
+				auth := r.Header.Get("Authorization")
+				const prefix = "Bearer "
+				if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) != 1 {
+					writeHTTPError(w, http.StatusUnauthorized, "unauthorized")
+					return
+				}
+			}
+			mux.ServeHTTP(w, r)
+		})
 	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/") {
-			auth := r.Header.Get("Authorization")
-			const prefix = "Bearer "
-			if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) != 1 {
-				writeHTTPError(w, http.StatusUnauthorized, "unauthorized")
-				return
-			}
-		}
-		mux.ServeHTTP(w, r)
-	})
+	handler = metrics.Middleware(handler)
+	handler = SecurityHeadersMiddleware(handler)
+	handler = RequestIDMiddleware(handler)
+	return handler
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -128,6 +124,10 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 			return false
 		}
 		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	if dec.More() || dec.Decode(&struct{}{}) != io.EOF {
+		writeHTTPError(w, http.StatusBadRequest, "request body must contain a single JSON object")
 		return false
 	}
 	return true
@@ -296,12 +296,35 @@ func (d *Daemon) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (d *Daemon) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"ready": true,
+		"apps":  len(d.ListApps()),
+		"nodes": len(d.WorkerPool().ListNodes()),
+	})
+}
+
 func escapePromLabel(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
 }
 
-func (d *Daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
+func (d *Daemon) writeMetrics(w http.ResponseWriter, metrics *HTTPMetrics) {
 	apps := d.ListApps()
+	nodes := d.WorkerPool().ListNodes()
+	healthyNodes := 0
+	for _, node := range nodes {
+		if node.Healthy {
+			healthyNodes++
+		}
+	}
+
+	var requestsTotal uint64
+	var errorsTotal uint64
+	if metrics != nil {
+		requestsTotal = metrics.RequestsTotal.Load()
+		errorsTotal = metrics.ErrorsTotal.Load()
+	}
+
 	var buf bytes.Buffer
 
 	fmt.Fprintf(&buf, "# TYPE smallcloud_apps_total gauge\n")
@@ -331,6 +354,18 @@ func (d *Daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(&buf, "smallcloud_app_halted{org_id=\"%s\",app=\"%s\"} %d\n", org, name, halted)
 	}
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_http_requests_total counter\n")
+	fmt.Fprintf(&buf, "smallcloud_http_requests_total %d\n", requestsTotal)
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_http_errors_total counter\n")
+	fmt.Fprintf(&buf, "smallcloud_http_errors_total %d\n", errorsTotal)
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_worker_nodes_total gauge\n")
+	fmt.Fprintf(&buf, "smallcloud_worker_nodes_total %d\n", len(nodes))
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_worker_nodes_healthy gauge\n")
+	fmt.Fprintf(&buf, "smallcloud_worker_nodes_healthy %d\n", healthyNodes)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -488,7 +523,7 @@ func (d *Daemon) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	registered, err := d.workerPool().RegisterNode(node)
+	registered, err := d.WorkerPool().RegisterNode(node)
 	if err != nil {
 		writeHTTPError(w, http.StatusBadRequest, err.Error())
 		return
@@ -502,7 +537,7 @@ func (d *Daemon) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	node, err := d.workerPool().Heartbeat(req.ID, req.ActiveApps)
+	node, err := d.WorkerPool().Heartbeat(req.ID, req.ActiveApps)
 	if err != nil {
 		if errors.Is(err, ErrNodeNotFound) {
 			writeHTTPError(w, http.StatusNotFound, err.Error())
@@ -516,7 +551,7 @@ func (d *Daemon) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
-		"nodes": d.workerPool().ListNodes(),
+		"nodes": d.WorkerPool().ListNodes(),
 	})
 }
 

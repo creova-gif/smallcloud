@@ -426,6 +426,10 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 	srv := &http.Server{
 		Handler:           d.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	rollCtx, rollCancel := context.WithCancel(ctx)
@@ -481,7 +485,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|nodes|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|verify-snapshot|nodes|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -891,6 +895,21 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			"keep_last": keepLast,
 			"pruned":    pruned,
 		})
+
+	case "verify-snapshot":
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		meta, err := d.Storage().VerifySnapshot(cfg.App.OrgID, cfg.App.Name)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, meta)
 
 	case "nodes":
 		if client == nil {

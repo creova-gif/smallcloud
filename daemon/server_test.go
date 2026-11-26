@@ -1232,3 +1232,145 @@ func TestGitHubWebhookEndpoint(t *testing.T) {
 		t.Fatalf("expected gitops_push audit event, got %+v", events)
 	}
 }
+
+func TestReadyzEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	cfg := &config.Config{
+		App: config.AppConfig{
+			Name:        "web",
+			OrgID:       "acme",
+			Domain:      "web.smallcloud.dev",
+			Port:        8000,
+			Healthcheck: "/healthz",
+			Runtime:     "dockerfile",
+		},
+		Resources: config.ResourcesConfig{
+			CPUMillicores: 250,
+			MemoryMB:      128,
+		},
+		Budget: config.BudgetConfig{
+			MaxMonthlyUSD: 10.0,
+			AlertAtPct:    80.0,
+			HardStop:      true,
+		},
+		Storage: config.StorageConfig{
+			SQLitePath: "/data/web.db",
+			SyncMs:     1000,
+		},
+	}
+	if _, err := d.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+	if _, err := d.WorkerPool().RegisterNode(WorkerNode{
+		ID:      "node-1",
+		Address: "10.0.0.1:8080",
+	}); err != nil {
+		t.Fatalf("register node failed: %v", err)
+	}
+
+	for _, h := range []http.Handler{d.HandlerWithAuth(""), d.HandlerWithAuth("secret-token")} {
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on /readyz, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var body struct {
+			Ready bool `json:"ready"`
+			Apps  int  `json:"apps"`
+			Nodes int  `json:"nodes"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal /readyz: %v", err)
+		}
+		if !body.Ready || body.Apps != 1 || body.Nodes != 1 {
+			t.Fatalf("unexpected /readyz payload: %+v", body)
+		}
+	}
+}
+
+func TestDecodeJSONBodyRejectsTrailingGarbage(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("")
+
+	for _, payload := range []string{
+		`{"org_id":"acme","app_name":"web"}{"extra":1}`,
+		`{"org_id":"acme","app_name":"web"} trailing`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/meter", bytes.NewBufferString(payload))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for trailing JSON %q, got %d: %s", payload, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestServerMiddlewareHeadersRequestIDAndMetrics(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	if _, err := d.WorkerPool().RegisterNode(WorkerNode{
+		ID:      "worker-metrics-1",
+		Address: "10.0.2.1:8080",
+	}); err != nil {
+		t.Fatalf("register node failed: %v", err)
+	}
+
+	req1 := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /healthz, got %d", rec1.Code)
+	}
+	if rec1.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("expected nosniff header, got %q", rec1.Header().Get("X-Content-Type-Options"))
+	}
+	if rec1.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("expected DENY header, got %q", rec1.Header().Get("X-Frame-Options"))
+	}
+	if rec1.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("expected no-referrer header, got %q", rec1.Header().Get("Referrer-Policy"))
+	}
+	if rec1.Header().Get("Cache-Control") != "" {
+		t.Fatalf("expected empty Cache-Control on /healthz, got %q", rec1.Header().Get("Cache-Control"))
+	}
+	if reqID := rec1.Header().Get("X-Request-ID"); len(reqID) != 32 {
+		t.Fatalf("expected generated 32-char X-Request-ID, got %q", reqID)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
+	req2.Header.Set("X-Request-ID", "req-custom_42")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated /v1/apps, got %d", rec2.Code)
+	}
+	if rec2.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected Cache-Control no-store on /v1/apps, got %q", rec2.Header().Get("Cache-Control"))
+	}
+	if rec2.Header().Get("X-Request-ID") != "req-custom_42" {
+		t.Fatalf("expected preserved X-Request-ID req-custom_42, got %q", rec2.Header().Get("X-Request-ID"))
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsRec := httptest.NewRecorder()
+	h.ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /metrics, got %d", metricsRec.Code)
+	}
+	body := metricsRec.Body.String()
+	for _, expected := range []string{
+		"smallcloud_http_requests_total 2\n",
+		"smallcloud_http_errors_total 1\n",
+		"smallcloud_worker_nodes_total 1\n",
+		"smallcloud_worker_nodes_healthy 1\n",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected %q in /metrics output, got:\n%s", expected, body)
+		}
+	}
+}

@@ -18,6 +18,13 @@ import (
 var (
 	validSlugRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]{1,62}$`)
 	validDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	unsafeEnvKeys = map[string]struct{}{
+		"LD_PRELOAD":            {},
+		"LD_LIBRARY_PATH":       {},
+		"DYLD_INSERT_LIBRARIES": {},
+		"DYLD_LIBRARY_PATH":     {},
+		"LD_AUDIT":              {},
+	}
 )
 
 func IsValidSlug(s string) bool {
@@ -336,6 +343,9 @@ func (c *Config) Validate() error {
 			}
 			if strings.ContainsRune(k, '=') || strings.IndexFunc(k, unicode.IsSpace) >= 0 {
 				return fmt.Errorf("env key %q contains invalid characters", k)
+			}
+			if _, unsafe := unsafeEnvKeys[strings.ToUpper(k)]; unsafe {
+				return fmt.Errorf("env key %q is forbidden for security reasons", k)
 			}
 			if strings.ContainsRune(c.Env[k], '\x00') {
 				return fmt.Errorf("env value for %q contains NUL byte", k)

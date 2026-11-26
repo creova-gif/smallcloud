@@ -463,3 +463,60 @@ func TestDaemonDeployStopsContainerOnSwapRouteFailure(t *testing.T) {
 		t.Fatalf("expected Stop on SwapRoute failure, got %v", rt.stopped)
 	}
 }
+
+func TestDaemonWorkerPoolPersistence(t *testing.T) {
+	d1 := NewDaemon(t.TempDir(), t.TempDir())
+	n1, err := d1.WorkerPool().RegisterNode(WorkerNode{
+		ID:         "worker-us-1",
+		Address:    "10.0.1.10:9000",
+		Region:     "us-east",
+		MaxApps:    15,
+		ActiveApps: 3,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode n1 failed: %v", err)
+	}
+	n2, err := d1.WorkerPool().RegisterNode(WorkerNode{
+		ID:         "worker-eu-1",
+		Address:    "10.0.2.20:9000",
+		Region:     "eu-west",
+		MaxApps:    25,
+		ActiveApps: 7,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode n2 failed: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "daemon-state.json")
+	if err := d1.SaveState(statePath); err != nil {
+		t.Fatalf("SaveState failed: %v", err)
+	}
+
+	d2 := NewDaemon(t.TempDir(), t.TempDir())
+	if err := d2.LoadState(statePath); err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+
+	got := d2.WorkerPool().ListNodes()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 worker nodes after LoadState, got %d", len(got))
+	}
+
+	want := []WorkerNode{n2, n1}
+	for i := range want {
+		if got[i].ID != want[i].ID ||
+			got[i].Address != want[i].Address ||
+			got[i].Region != want[i].Region ||
+			got[i].Healthy != want[i].Healthy ||
+			got[i].MaxApps != want[i].MaxApps ||
+			got[i].ActiveApps != want[i].ActiveApps ||
+			!got[i].LastHeartbeat.Equal(want[i].LastHeartbeat) {
+			t.Fatalf("node %d mismatch: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	zeroDaemon := &Daemon{}
+	if zeroDaemon.WorkerPool() == nil {
+		t.Fatal("expected lazy-initialized WorkerPool on zero-value Daemon")
+	}
+}
