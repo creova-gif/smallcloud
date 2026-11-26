@@ -386,6 +386,20 @@ func (c *DaemonClient) RemoveNode(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/v1/nodes?"+q.Encode(), nil, nil)
 }
 
+func (c *DaemonClient) SelectNode(ctx context.Context, region string) (daemon.WorkerNode, error) {
+	path := "/v1/nodes/select"
+	if region = strings.TrimSpace(region); region != "" {
+		q := url.Values{}
+		q.Set("region", region)
+		path += "?" + q.Encode()
+	}
+	var out daemon.WorkerNode
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return daemon.WorkerNode{}, err
+	}
+	return out, nil
+}
+
 func (c *DaemonClient) DownloadBackup(ctx context.Context, orgID, appName, destPath string) error {
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if base == "" {

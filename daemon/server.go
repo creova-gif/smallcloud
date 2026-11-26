@@ -99,6 +99,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("POST /v1/nodes/register", d.handleNodeRegister)
 	mux.HandleFunc("POST /v1/nodes/heartbeat", d.handleNodeHeartbeat)
 	mux.HandleFunc("GET /v1/nodes", d.handleListNodes)
+	mux.HandleFunc("GET /v1/nodes/select", d.handleSelectNode)
 	mux.HandleFunc("DELETE /v1/nodes", d.handleDeleteNode)
 	mux.HandleFunc("GET /v1/backup", d.handleBackup)
 	mux.HandleFunc("POST /v1/restore", d.handleRestore)
@@ -630,6 +631,20 @@ func (d *Daemon) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
 		"nodes": d.WorkerPool().ListNodes(),
 	})
+}
+
+func (d *Daemon) handleSelectNode(w http.ResponseWriter, r *http.Request) {
+	region := strings.TrimSpace(r.URL.Query().Get("region"))
+	node, err := d.WorkerPool().SelectNode(region)
+	if err != nil {
+		if errors.Is(err, ErrNoHealthyNode) {
+			writeHTTPError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, node)
 }
 
 func (d *Daemon) handleDeleteNode(w http.ResponseWriter, r *http.Request) {

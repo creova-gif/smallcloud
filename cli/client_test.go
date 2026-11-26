@@ -614,3 +614,74 @@ func TestDaemonClientHeartbeatAndRemoveNode(t *testing.T) {
 		t.Fatalf("expected 401 error from RemoveNode, got %v", err)
 	}
 }
+
+func TestDaemonClientSelectNode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/nodes/select" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		region := r.URL.Query().Get("region")
+		switch region {
+		case "us-east":
+			_ = json.NewEncoder(w).Encode(daemon.WorkerNode{
+				ID:         "worker-east-1",
+				Address:    "10.0.1.10:8080",
+				Region:     "us-east",
+				Healthy:    true,
+				MaxApps:    20,
+				ActiveApps: 2,
+			})
+		case "":
+			_ = json.NewEncoder(w).Encode(daemon.WorkerNode{
+				ID:         "worker-any-1",
+				Address:    "10.0.0.10:8080",
+				Region:     "eu-west",
+				Healthy:    true,
+				MaxApps:    20,
+				ActiveApps: 1,
+			})
+		case "ap-south":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"no healthy worker node available"}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"unexpected region"}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	unauthClient := NewDaemonClient(srv.URL, "wrong-tok")
+	ctx := context.Background()
+
+	node, err := client.SelectNode(ctx, "us-east")
+	if err != nil {
+		t.Fatalf("SelectNode us-east failed: %v", err)
+	}
+	if node.ID != "worker-east-1" || node.Region != "us-east" || node.Address != "10.0.1.10:8080" {
+		t.Fatalf("unexpected selected node: %+v", node)
+	}
+
+	anyNode, err := client.SelectNode(ctx, "")
+	if err != nil {
+		t.Fatalf("SelectNode empty region failed: %v", err)
+	}
+	if anyNode.ID != "worker-any-1" || anyNode.Region != "eu-west" {
+		t.Fatalf("unexpected any-region node: %+v", anyNode)
+	}
+
+	if _, err := client.SelectNode(ctx, "ap-south"); err == nil || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "no healthy worker node available") {
+		t.Fatalf("expected 503 error from SelectNode, got %v", err)
+	}
+
+	if _, err := unauthClient.SelectNode(ctx, "us-east"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error from SelectNode, got %v", err)
+	}
+}

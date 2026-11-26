@@ -611,3 +611,53 @@ func TestDockerRuntimeStartResourceLimitsAndLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestDockerRuntimeSecurityHardeningFlags(t *testing.T) {
+	var runArgs []string
+	rt := DockerRuntime{
+		CommandRunner: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "run" {
+				runArgs = append([]string(nil), args...)
+			}
+			return []byte("ok"), nil
+		},
+	}
+
+	spec := ContainerSpec{
+		OrgID:         "acme",
+		AppName:       "billing",
+		ReleaseID:     "rel-sec",
+		AppDir:        "/srv/apps/billing",
+		Port:          18080,
+		CPUMillicores: 500,
+		MemoryMB:      256,
+	}
+
+	if _, err := rt.Start(context.Background(), spec); err != nil {
+		t.Fatalf("DockerRuntime.Start failed: %v", err)
+	}
+
+	wantImage := "smallcloud-acme-billing:rel-sec"
+	if len(runArgs) == 0 || runArgs[len(runArgs)-1] != wantImage {
+		t.Fatalf("expected image %q as last arg, got %v", wantImage, runArgs)
+	}
+
+	flagArgs := runArgs[:len(runArgs)-1]
+	requiredPairs := [][2]string{
+		{"--security-opt", "no-new-privileges:true"},
+		{"--cap-drop", "ALL"},
+	}
+
+	for _, pair := range requiredPairs {
+		found := false
+		for i := 0; i+1 < len(flagArgs); i++ {
+			if flagArgs[i] == pair[0] && flagArgs[i+1] == pair[1] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s %s before image arg in %v", pair[0], pair[1], runArgs)
+		}
+	}
+}

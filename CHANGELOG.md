@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **State Durability & Fallback Recovery**: Added `state.json.bak` backup and `.sha256` checksum verification with automatic fallback recovery when loading persisted daemon state.
 - **Docker Container Resource & Label Flags**: Enforced container limits and metadata via Docker `--memory`, `--cpus`, and `--label` flags in `daemon/runtime.go`.
 - **Cross-Platform Release Workflow**: Added `.github/workflows/release.yml` to test, run `smallcloud eval`, and publish `linux`/`darwin` (`amd64`/`arm64`) binaries with `checksums.txt` on `v*` tags.
+- **Threat Model & Security Policy**: Expanded `docs/THREAT_MODEL.md` with STRIDE threat analysis and added `SECURITY.md` with vulnerability disclosure and hardening guidance.
+- **Webhook Retry Backoff**: Added bounded exponential backoff retries to `WebhookNotifier` for transient webhook delivery failures.
+- **Worker Node Lifecycle Endpoints & Client**: Added `DELETE /v1/nodes` and `GET /v1/nodes/select` on the control-plane daemon alongside `DaemonClient.RemoveNode`, `DaemonClient.HeartbeatNode`, and `DaemonClient.SelectNode` in the CLI client.
+- **Docker Container Privilege Hardening**: Enforced `--security-opt no-new-privileges:true` and `--cap-drop ALL` when launching containers in `daemon/runtime.go`.
+- **Daemon Microbenchmarks**: Added `daemon/bench_test.go` microbenchmarks for core control-plane paths.
 
 ### Wave 7 — Distributed Edge, Zero-Trust Mesh & Developer Platform
 - **GitHub Webhook Git-Push Deployments**: HMAC-SHA256 webhook signature verification (`VerifyGitHubSignature`) and push event parsing (`ParseGitHubPushEvent`) in `daemon/gitops.go`.

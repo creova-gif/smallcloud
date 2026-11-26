@@ -1740,3 +1740,73 @@ func TestRestoreEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 with bearer token, got %d: %s", authRec.Code, authRec.Body.String())
 	}
 }
+
+func TestSelectNodeEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/v1/nodes/select", nil)
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", unauthRec.Code, unauthRec.Body.String())
+	}
+
+	emptyReq := httptest.NewRequest(http.MethodGet, "/v1/nodes/select", nil)
+	emptyReq.Header.Set("Authorization", "Bearer secret-token")
+	emptyRec := httptest.NewRecorder()
+	h.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on empty pool, got %d: %s", emptyRec.Code, emptyRec.Body.String())
+	}
+
+	nodes := []WorkerNode{
+		{ID: "node-eu-low", Address: "10.0.2.1:8080", Region: "eu-west", MaxApps: 10, ActiveApps: 1},
+		{ID: "node-us-full", Address: "10.0.1.1:8080", Region: "us-east", MaxApps: 5, ActiveApps: 5},
+		{ID: "node-us-busy", Address: "10.0.1.2:8080", Region: "us-east", MaxApps: 10, ActiveApps: 4},
+		{ID: "node-us-free", Address: "10.0.1.3:8080", Region: "us-east", MaxApps: 10, ActiveApps: 2},
+	}
+	for _, n := range nodes {
+		if _, err := d.WorkerPool().RegisterNode(n); err != nil {
+			t.Fatalf("register node %s: %v", n.ID, err)
+		}
+	}
+
+	anyReq := httptest.NewRequest(http.MethodGet, "/v1/nodes/select", nil)
+	anyReq.Header.Set("Authorization", "Bearer secret-token")
+	anyRec := httptest.NewRecorder()
+	h.ServeHTTP(anyRec, anyReq)
+	if anyRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on select without region, got %d: %s", anyRec.Code, anyRec.Body.String())
+	}
+	var anySelected WorkerNode
+	if err := json.Unmarshal(anyRec.Body.Bytes(), &anySelected); err != nil {
+		t.Fatalf("unmarshal selected node: %v", err)
+	}
+	if anySelected.ID != "node-eu-low" {
+		t.Fatalf("expected least-loaded node-eu-low, got %+v", anySelected)
+	}
+
+	eastReq := httptest.NewRequest(http.MethodGet, "/v1/nodes/select?region=us-east", nil)
+	eastReq.Header.Set("Authorization", "Bearer secret-token")
+	eastRec := httptest.NewRecorder()
+	h.ServeHTTP(eastRec, eastReq)
+	if eastRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on select with region=us-east, got %d: %s", eastRec.Code, eastRec.Body.String())
+	}
+	var eastSelected WorkerNode
+	if err := json.Unmarshal(eastRec.Body.Bytes(), &eastSelected); err != nil {
+		t.Fatalf("unmarshal east selected node: %v", err)
+	}
+	if eastSelected.ID != "node-us-free" {
+		t.Fatalf("expected least-loaded us-east node-us-free, got %+v", eastSelected)
+	}
+
+	missReq := httptest.NewRequest(http.MethodGet, "/v1/nodes/select?region=ap-south", nil)
+	missReq.Header.Set("Authorization", "Bearer secret-token")
+	missRec := httptest.NewRecorder()
+	h.ServeHTTP(missRec, missReq)
+	if missRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for unmatched region, got %d: %s", missRec.Code, missRec.Body.String())
+	}
+}

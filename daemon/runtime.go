@@ -153,6 +153,8 @@ func (r DockerRuntime) Start(ctx context.Context, spec ContainerSpec) (string, e
 
 	runArgs := []string{
 		"run", "-d", "--rm",
+		"--security-opt", "no-new-privileges:true",
+		"--cap-drop", "ALL",
 		"--name", name,
 		"--label", "smallcloud.managed=true",
 		"--label", "smallcloud.org=" + spec.OrgID,
