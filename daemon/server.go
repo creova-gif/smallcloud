@@ -45,6 +45,13 @@ type canaryRequest struct {
 	CanaryWeight int    `json:"canary_weight"`
 }
 
+type canaryReconcileRequest struct {
+	OrgID      string `json:"org_id"`
+	AppName    string `json:"app_name"`
+	HealthPath string `json:"health_path"`
+	TimeoutMs  int    `json:"timeout_ms"`
+}
+
 type orgQuotaRequest struct {
 	OrgID         string  `json:"org_id"`
 	MaxMonthlyUSD float64 `json:"max_monthly_usd"`
@@ -78,6 +85,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
 	mux.HandleFunc("POST /v1/canary", d.handleCanary)
+	mux.HandleFunc("POST /v1/canary/reconcile", d.handleCanaryReconcile)
 	mux.HandleFunc("GET /v1/apps", d.handleListApps)
 	mux.HandleFunc("DELETE /v1/apps", d.handleDeleteApp)
 	mux.HandleFunc("GET /v1/status", d.handleStatus)
@@ -437,6 +445,58 @@ func (d *Daemon) handleCanary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeHTTPJSON(w, http.StatusOK, route)
+}
+
+func (d *Daemon) handleCanaryReconcile(w http.ResponseWriter, r *http.Request) {
+	var req canaryReconcileRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	if err := validateTenantSlugs(req.OrgID, req.AppName); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	healthPath := strings.TrimSpace(req.HealthPath)
+	if healthPath == "" {
+		d.metaMu.RLock()
+		meta, ok := d.appMeta[tenantKey(req.OrgID, req.AppName)]
+		d.metaMu.RUnlock()
+		if ok && strings.TrimSpace(meta.Healthcheck) != "" {
+			healthPath = strings.TrimSpace(meta.Healthcheck)
+		} else {
+			healthPath = "/healthz"
+		}
+	}
+
+	timeoutMs := req.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 2000
+	}
+	if timeoutMs > 30000 {
+		timeoutMs = 30000
+	}
+
+	decision, err := EvaluateAndReconcileCanary(
+		r.Context(),
+		d,
+		req.OrgID,
+		req.AppName,
+		healthPath,
+		25*time.Millisecond,
+		time.Duration(timeoutMs)*time.Millisecond,
+	)
+	if err != nil {
+		if errors.Is(err, ErrNoRouteFound) {
+			writeHTTPError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeHTTPJSON(w, http.StatusOK, decision)
 }
 
 func (d *Daemon) handleLogs(w http.ResponseWriter, r *http.Request) {

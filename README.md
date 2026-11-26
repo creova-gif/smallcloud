@@ -23,11 +23,14 @@ flowchart LR
 - **Zero-Downtime Blue/Green & Canary Swaps**: Atomic Caddy upstream switching, weighted canary traffic splitting (`X%` Blue / `Y%` Green), automated canary rollback, and instant `rollback` to previous releases.
 - **Hard Monthly Budget Caps & Org Quotas**: Synchronous spend circuit breaker (`ErrBudgetExceeded` / HTTP `402` with `Retry-After`), per-app `max_monthly_usd` limits, automated monthly billing-cycle rollovers, and org-level aggregate quotas.
 - **Streaming SQLite WAL Replication & Snapshot Pruning**: Bounded-buffer `io.Copy` + `io.TeeReader` WAL streaming with SHA-256 verification, atomic `os.Rename` restores, and automated retention-based snapshot pruning.
+- **Durable Control-Plane State**: Atomic `state.json` persistence with `.bak` fallback recovery and `.sha256` checksum verification across daemon restarts.
 - **Multi-Runtime Starter Templates**: Production-ready templates for FastAPI (`templates/fastapi-sqlite/`), Node.js 22 ESM (`templates/node-sqlite/`), and Go (`templates/go-sqlite/`).
 - **Operator Web UI & Prometheus `/metrics`**: Embedded single-binary dashboard at `/` and `/ui` for inspecting app health, budget burn, and recent deployments, plus Prometheus metrics and `/healthz`.
 - **HMAC Webhooks & GitOps**: HMAC-SHA256 signed budget/alert webhook deliveries (`X-SmallCloud-Signature-256`) and GitHub push webhook verification for GitOps deployments.
 
 ## Installation
+
+Prebuilt release binaries for `linux` and `darwin` (`amd64` and `arm64`) with SHA-256 `checksums.txt` are published on GitHub Releases for `v*` tags.
 
 Install with Go 1.23+:
 
@@ -80,6 +83,7 @@ smallcloud status ./my-app
 | `deploy` | Deploy an application release with cgroups, storage, and Blue/Green swap | `smallcloud deploy ./templates/fastapi-sqlite v1.0.0` |
 | `rollback` | Roll back an application to its previous active release | `smallcloud rollback ./templates/fastapi-sqlite` |
 | `canary` | Shift a percentage of traffic to the canary upstream | `smallcloud canary ./templates/fastapi-sqlite 20` |
+| `canary-reconcile` | Evaluate canary health and promote or roll back automatically | `smallcloud canary-reconcile ./templates/fastapi-sqlite` |
 | `status` | Inspect current release, route color, cgroups, and budget state | `smallcloud status ./templates/fastapi-sqlite` |
 | `list` / `ps` | List all deployed applications managed by the control plane | `smallcloud list` |
 | `logs` | Stream or fetch container logs for an application | `smallcloud logs ./templates/fastapi-sqlite` |

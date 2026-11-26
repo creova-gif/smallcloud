@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Archive Extraction Hardening**: Hardened `.tar.gz` backup extraction against tar-bomb path traversal, oversized entries, and unsafe symlinks/hardlinks.
 - **CLI Version & Build Metadata**: Added `smallcloud version` subcommand with `cli.Version` ldflags injection in CI builds.
 - **CI Coverage Reporting**: Updated GitHub Actions CI to collect Go test coverage with `go test -race -coverprofile=coverage.out ./...` and report total coverage.
+- **Remote Restore Endpoint & Client**: Added `POST /v1/restore` on the control-plane daemon, `DaemonClient.RestoreBackup` in the CLI client, and remote `smallcloud restore-bundle` support when `SMALLCLOUD_DAEMON_URL` is configured.
+- **Canary Reconciliation Endpoint & CLI**: Added `POST /v1/canary/reconcile`, `DaemonClient.ReconcileCanary`, and the `smallcloud canary-reconcile` CLI command for automated canary health evaluation and reconciliation.
+- **State Durability & Fallback Recovery**: Added `state.json.bak` backup and `.sha256` checksum verification with automatic fallback recovery when loading persisted daemon state.
+- **Docker Container Resource & Label Flags**: Enforced container limits and metadata via Docker `--memory`, `--cpus`, and `--label` flags in `daemon/runtime.go`.
+- **Cross-Platform Release Workflow**: Added `.github/workflows/release.yml` to test, run `smallcloud eval`, and publish `linux`/`darwin` (`amd64`/`arm64`) binaries with `checksums.txt` on `v*` tags.
 
 ### Wave 7 — Distributed Edge, Zero-Trust Mesh & Developer Platform
 - **GitHub Webhook Git-Push Deployments**: HMAC-SHA256 webhook signature verification (`VerifyGitHubSignature`) and push event parsing (`ParseGitHubPushEvent`) in `daemon/gitops.go`.

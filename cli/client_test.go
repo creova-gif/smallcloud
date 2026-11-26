@@ -486,3 +486,54 @@ func TestDaemonClientRestoreBackup(t *testing.T) {
 		t.Fatal("expected error for missing bundle file")
 	}
 }
+
+func TestDaemonClientReconcileCanary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/canary/reconcile" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			OrgID      string `json:"org_id"`
+			AppName    string `json:"app_name"`
+			HealthPath string `json:"health_path"`
+			TimeoutMs  int    `json:"timeout_ms"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode reconcile request: %v", err)
+		}
+		if req.OrgID != "org-alpha" || req.AppName != "micro-crm" || req.HealthPath != "/healthz" || req.TimeoutMs != 1500 {
+			t.Fatalf("unexpected reconcile request: %+v", req)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(daemon.CanaryDecision{
+			OrgID:           req.OrgID,
+			AppName:         req.AppName,
+			StandbyUpstream: "127.0.0.1:9001",
+			Healthy:         true,
+			Action:          "promoted",
+		})
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	ctx := context.Background()
+
+	dec, err := client.ReconcileCanary(ctx, "org-alpha", "micro-crm", "/healthz", 1500)
+	if err != nil {
+		t.Fatalf("ReconcileCanary failed: %v", err)
+	}
+	if dec.OrgID != "org-alpha" || dec.AppName != "micro-crm" || !dec.Healthy || dec.Action != "promoted" || dec.StandbyUpstream != "127.0.0.1:9001" {
+		t.Fatalf("unexpected CanaryDecision: %+v", dec)
+	}
+
+	unauthClient := NewDaemonClient(srv.URL, "wrong-tok")
+	if _, err := unauthClient.ReconcileCanary(ctx, "org-alpha", "micro-crm", "/healthz", 1500); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error, got %v", err)
+	}
+}

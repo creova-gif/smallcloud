@@ -265,6 +265,25 @@ func (c *DaemonClient) SetCanaryWeight(ctx context.Context, orgID, appName strin
 	return out, nil
 }
 
+func (c *DaemonClient) ReconcileCanary(ctx context.Context, orgID, appName, healthPath string, timeoutMs int) (daemon.CanaryDecision, error) {
+	req := struct {
+		OrgID      string `json:"org_id"`
+		AppName    string `json:"app_name"`
+		HealthPath string `json:"health_path"`
+		TimeoutMs  int    `json:"timeout_ms"`
+	}{
+		OrgID:      orgID,
+		AppName:    appName,
+		HealthPath: healthPath,
+		TimeoutMs:  timeoutMs,
+	}
+	var out daemon.CanaryDecision
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/canary/reconcile", req, &out); err != nil {
+		return daemon.CanaryDecision{}, err
+	}
+	return out, nil
+}
+
 func (c *DaemonClient) Logs(ctx context.Context, orgID, appName, releaseID string, tail int) (string, error) {
 	q := url.Values{}
 	q.Set("org_id", orgID)

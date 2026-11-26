@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -518,5 +520,113 @@ func TestDaemonWorkerPoolPersistence(t *testing.T) {
 	zeroDaemon := &Daemon{}
 	if zeroDaemon.WorkerPool() == nil {
 		t.Fatal("expected lazy-initialized WorkerPool on zero-value Daemon")
+	}
+}
+
+func TestDaemonStateChecksumAndBackupFallback(t *testing.T) {
+	d1 := NewDaemon(t.TempDir(), t.TempDir())
+	cfg := sampleConfig()
+	if _, err := d1.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy v1 failed: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := d1.SaveState(statePath); err != nil {
+		t.Fatalf("initial SaveState failed: %v", err)
+	}
+
+	rawV1, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state.json failed: %v", err)
+	}
+	sidecarV1, err := os.ReadFile(statePath + ".sha256")
+	if err != nil {
+		t.Fatalf("read state.json.sha256 failed: %v", err)
+	}
+	sumV1 := sha256.Sum256(rawV1)
+	if got, want := strings.TrimSpace(string(sidecarV1)), hex.EncodeToString(sumV1[:]); got != want {
+		t.Fatalf("sha256 sidecar = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(statePath + ".bak"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no .bak on first SaveState, got err=%v", err)
+	}
+
+	if _, err := d1.Deploy(cfg, "v2.0.0"); err != nil {
+		t.Fatalf("deploy v2 failed: %v", err)
+	}
+	if err := d1.SaveState(statePath); err != nil {
+		t.Fatalf("second SaveState failed: %v", err)
+	}
+
+	bakBytes, err := os.ReadFile(statePath + ".bak")
+	if err != nil {
+		t.Fatalf("read state.json.bak failed: %v", err)
+	}
+	if !bytes.Equal(bakBytes, rawV1) {
+		t.Fatal("expected state.json.bak to preserve previous state.json bytes")
+	}
+
+	rawV2, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read v2 state.json failed: %v", err)
+	}
+	sidecarV2, err := os.ReadFile(statePath + ".sha256")
+	if err != nil {
+		t.Fatalf("read v2 state.json.sha256 failed: %v", err)
+	}
+	sumV2 := sha256.Sum256(rawV2)
+	if got, want := strings.TrimSpace(string(sidecarV2)), hex.EncodeToString(sumV2[:]); got != want {
+		t.Fatalf("v2 sha256 sidecar = %q, want %q", got, want)
+	}
+
+	if err := os.WriteFile(statePath, []byte("{corrupt-json"), 0o600); err != nil {
+		t.Fatalf("corrupt state.json failed: %v", err)
+	}
+
+	d2 := NewDaemon(t.TempDir(), t.TempDir())
+	if err := d2.LoadState(statePath); err != nil {
+		t.Fatalf("LoadState recovery from .bak failed: %v", err)
+	}
+	route, ok := d2.Router().GetRoute(cfg.App.OrgID, cfg.App.Name)
+	if !ok || route.ActiveReleaseID != "v1.0.0" {
+		t.Fatalf("expected recovered route v1.0.0, got ok=%v route=%+v", ok, route)
+	}
+
+	foundRecoveryAudit := false
+	for _, ev := range d2.Audit().List("", "", 0) {
+		if ev.Type == "state_recovered_from_backup" {
+			foundRecoveryAudit = true
+			break
+		}
+	}
+	if !foundRecoveryAudit {
+		t.Fatal("expected audit event state_recovered_from_backup")
+	}
+
+	if err := os.WriteFile(statePath, rawV2, 0o600); err != nil {
+		t.Fatalf("restore valid json for checksum test failed: %v", err)
+	}
+	if err := os.WriteFile(statePath+".sha256", []byte(strings.Repeat("0", 64)+"\n"), 0o600); err != nil {
+		t.Fatalf("tamper sha256 sidecar failed: %v", err)
+	}
+	d3 := NewDaemon(t.TempDir(), t.TempDir())
+	if err := d3.LoadState(statePath); err != nil {
+		t.Fatalf("LoadState checksum-mismatch recovery failed: %v", err)
+	}
+	route3, ok := d3.Router().GetRoute(cfg.App.OrgID, cfg.App.Name)
+	if !ok || route3.ActiveReleaseID != "v1.0.0" {
+		t.Fatalf("expected recovered route v1.0.0 on checksum mismatch, got ok=%v route=%+v", ok, route3)
+	}
+
+	if err := os.Remove(statePath); err != nil {
+		t.Fatalf("remove state.json failed: %v", err)
+	}
+	d4 := NewDaemon(t.TempDir(), t.TempDir())
+	if err := d4.LoadState(statePath); err != nil {
+		t.Fatalf("LoadState missing-primary fallback failed: %v", err)
+	}
+	route4, ok := d4.Router().GetRoute(cfg.App.OrgID, cfg.App.Name)
+	if !ok || route4.ActiveReleaseID != "v1.0.0" {
+		t.Fatalf("expected recovered route v1.0.0 on missing primary, got ok=%v route=%+v", ok, route4)
 	}
 }

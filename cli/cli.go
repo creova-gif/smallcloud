@@ -494,7 +494,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|verify-snapshot|backup|restore-bundle|nodes|serve|version|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|canary-reconcile|prune|verify-snapshot|backup|restore-bundle|nodes|serve|version|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -567,7 +567,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune" || cmd == "backup" || cmd == "restore-bundle" || cmd == "nodes") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "canary-reconcile" || cmd == "prune" || cmd == "backup" || cmd == "restore-bundle" || cmd == "nodes") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -864,6 +864,54 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			return err
 		}
 		return writeJSON(stdout, route)
+
+	case "canary-reconcile":
+		dir := "."
+		timeoutMs := 2000
+		switch len(args) {
+		case 2:
+			if v, err := strconv.Atoi(args[1]); err == nil {
+				timeoutMs = v
+			} else {
+				dir = args[1]
+			}
+		default:
+			if len(args) >= 3 {
+				dir = args[1]
+				v, err := strconv.Atoi(args[2])
+				if err != nil {
+					return fmt.Errorf("invalid timeout_ms %q: %w", args[2], err)
+				}
+				timeoutMs = v
+			}
+		}
+		if timeoutMs <= 0 {
+			return fmt.Errorf("timeout_ms must be > 0, got %d", timeoutMs)
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		if client != nil {
+			decision, err := client.ReconcileCanary(context.Background(), cfg.App.OrgID, cfg.App.Name, cfg.App.Healthcheck, timeoutMs)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, decision)
+		}
+		timeout := time.Duration(timeoutMs) * time.Millisecond
+		interval := 50 * time.Millisecond
+		if timeout < interval {
+			interval = timeout
+		}
+		decision, err := daemon.EvaluateAndReconcileCanary(context.Background(), d, cfg.App.OrgID, cfg.App.Name, cfg.App.Healthcheck, interval, timeout)
+		if err != nil {
+			return err
+		}
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, decision)
 
 	case "prune":
 		dir := "."

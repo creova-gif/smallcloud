@@ -1165,3 +1165,207 @@ func TestCLIRemoteRestoreBundle(t *testing.T) {
 		t.Fatalf("expected no local state.json when routing restore-bundle to remote daemon, got %v", err)
 	}
 }
+
+func TestCLICanaryReconcileAndEdgeErrors(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+	localStateDir := t.TempDir()
+
+	if err := Run([]string{"canary-reconcile", missingDir}, localStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary-reconcile with missing config dir to fail")
+	}
+	if err := Run([]string{"canary-reconcile", templateDir, "not-an-int"}, localStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary-reconcile with invalid timeout_ms to fail")
+	}
+	if err := Run([]string{"canary-reconcile", templateDir, "0"}, localStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary-reconcile with non-positive timeout_ms to fail")
+	}
+	if err := Run([]string{"canary-reconcile", templateDir}, localStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary-reconcile on undeployed app to fail")
+	}
+
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, localStateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("deploy v1.0.0 failed: %v", err)
+	}
+	if err := Run([]string{"deploy", templateDir, "v1.1.0"}, localStateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("deploy v1.1.0 failed: %v", err)
+	}
+
+	var noopOut bytes.Buffer
+	if err := Run([]string{"canary-reconcile", templateDir}, localStateDir, &noopOut); err != nil {
+		t.Fatalf("local canary-reconcile noop failed: %v", err)
+	}
+	var noopDec daemon.CanaryDecision
+	if err := json.Unmarshal(noopOut.Bytes(), &noopDec); err != nil {
+		t.Fatalf("unmarshal noop CanaryDecision: %v", err)
+	}
+	if noopDec.Action != "noop" {
+		t.Fatalf("expected noop action when canary weight is 0, got %+v", noopDec)
+	}
+
+	if err := Run([]string{"canary", templateDir, "25"}, localStateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("canary set weight failed: %v", err)
+	}
+	var rollbackOut bytes.Buffer
+	if err := Run([]string{"canary-reconcile", templateDir, "40"}, localStateDir, &rollbackOut); err != nil {
+		t.Fatalf("local canary-reconcile rollback failed: %v", err)
+	}
+	var rbDec daemon.CanaryDecision
+	if err := json.Unmarshal(rollbackOut.Bytes(), &rbDec); err != nil {
+		t.Fatalf("unmarshal rollback CanaryDecision: %v", err)
+	}
+	if rbDec.Action != "rolled_back" || rbDec.Healthy {
+		t.Fatalf("expected rolled_back unhealthy decision, got %+v", rbDec)
+	}
+
+	const token = "cli-canary-reconcile-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/canary/reconcile" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			OrgID      string `json:"org_id"`
+			AppName    string `json:"app_name"`
+			HealthPath string `json:"health_path"`
+			TimeoutMs  int    `json:"timeout_ms"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode remote reconcile request: %v", err)
+		}
+		if req.OrgID != "org-indie-default" || req.AppName != "fastapi-starter" || req.HealthPath != "/healthz" || req.TimeoutMs != 1200 {
+			t.Fatalf("unexpected remote reconcile request: %+v", req)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(daemon.CanaryDecision{
+			OrgID:           req.OrgID,
+			AppName:         req.AppName,
+			StandbyUpstream: "127.0.0.1:8001",
+			Healthy:         true,
+			Action:          "promoted",
+		})
+	}))
+	defer srv.Close()
+
+	remoteStateDir := t.TempDir()
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+
+	var remoteOut bytes.Buffer
+	if err := Run([]string{"canary-reconcile", templateDir, "1200"}, remoteStateDir, &remoteOut); err != nil {
+		t.Fatalf("remote canary-reconcile failed: %v", err)
+	}
+	var remoteDec daemon.CanaryDecision
+	if err := json.Unmarshal(remoteOut.Bytes(), &remoteDec); err != nil {
+		t.Fatalf("unmarshal remote CanaryDecision: %v", err)
+	}
+	if remoteDec.Action != "promoted" || !remoteDec.Healthy {
+		t.Fatalf("expected promoted healthy decision, got %+v", remoteDec)
+	}
+	if _, err := os.Stat(filepath.Join(remoteStateDir, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no local state.json when routing canary-reconcile remotely, got %v", err)
+	}
+
+	t.Setenv("SMALLCLOUD_API_TOKEN", "wrong-token")
+	if err := Run([]string{"canary-reconcile", templateDir}, remoteStateDir, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error on unauthorized remote canary-reconcile, got %v", err)
+	}
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", "")
+	t.Setenv("SMALLCLOUD_API_TOKEN", "")
+	errStateDir := t.TempDir()
+
+	if err := Run(nil, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected empty args to return usage error")
+	}
+	if err := Run([]string{"not-a-command"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected unknown command to fail")
+	}
+
+	if err := Run([]string{"canary"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary without args to fail")
+	}
+	if err := Run([]string{"canary", templateDir, "abc"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary with invalid standby_pct to fail")
+	}
+	if err := Run([]string{"canary", missingDir, "25"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary with missing config to fail")
+	}
+	if err := Run([]string{"canary", templateDir, "25"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected canary on undeployed app to fail")
+	}
+
+	if err := Run([]string{"org-quota"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected org-quota without org_id to fail")
+	}
+	if err := Run([]string{"org-quota", "org-indie-default", "bad-float"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected org-quota with invalid float to fail")
+	}
+	if err := Run([]string{"org-quota", "org-indie-default", "-5"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected org-quota with negative quota to fail")
+	}
+
+	if err := Run([]string{"prune", templateDir, "not-an-int"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected prune with invalid keep_last to fail")
+	}
+	if err := Run([]string{"prune", missingDir, "2"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected prune with missing config to fail")
+	}
+	if err := Run([]string{"prune", templateDir, "-1"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected prune with negative keep_last to fail")
+	}
+
+	if err := Run([]string{"destroy", missingDir}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected destroy with missing config to fail")
+	}
+	if err := Run([]string{"destroy", templateDir}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected destroy on undeployed app to fail")
+	}
+
+	fileAsDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(fileAsDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+	if err := Run([]string{"eval"}, fileAsDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected eval with non-directory stateDir to fail")
+	}
+
+	if err := Run([]string{"nodes"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected nodes without SMALLCLOUD_DAEMON_URL to fail")
+	}
+	if err := Run([]string{"rollover", "not-a-timestamp"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected rollover with invalid timestamp to fail")
+	}
+	if err := Run([]string{"init", t.TempDir(), "--template=unknown"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected init with unsupported template to fail")
+	}
+	if err := Run([]string{"meter"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected meter without args to fail")
+	}
+	if err := Run([]string{"meter", templateDir, "bad-float"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected meter with invalid delta_usd to fail")
+	}
+	if err := Run([]string{"meter", missingDir, "1.0"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected meter with missing config to fail")
+	}
+	if err := Run([]string{"budget", templateDir, "bad-float"}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected budget with invalid max_monthly_usd to fail")
+	}
+	if err := Run([]string{"budget", missingDir}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected budget with missing config to fail")
+	}
+	if err := Run([]string{"budget", templateDir}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected budget read on undeployed app to fail")
+	}
+	if err := Run([]string{"backup", missingDir, filepath.Join(t.TempDir(), "out.tar.gz")}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected backup with missing config to fail")
+	}
+	if err := Run([]string{"restore-bundle", filepath.Join(t.TempDir(), "missing.tar.gz")}, errStateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected restore-bundle with missing file to fail")
+	}
+}

@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -638,24 +641,54 @@ func (d *Daemon) ListApps() []AppStatus {
 	return apps
 }
 
-func (d *Daemon) LoadState(path string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
+func readAndUnmarshalDaemonState(path string, verifySidecar bool) (DaemonState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read daemon state %q: %w", path, err)
+		return DaemonState{}, err
 	}
 	if len(data) == 0 {
-		return fmt.Errorf("corrupt daemon state %q: empty file", path)
+		return DaemonState{}, fmt.Errorf("corrupt daemon state %q: empty file", path)
+	}
+	if verifySidecar {
+		sidecar, err := os.ReadFile(path + ".sha256")
+		if err == nil {
+			expected := strings.ToLower(strings.TrimSpace(string(sidecar)))
+			sum := sha256.Sum256(data)
+			actual := hex.EncodeToString(sum[:])
+			if expected == "" || actual != expected {
+				return DaemonState{}, fmt.Errorf("corrupt daemon state %q: sha256 checksum mismatch", path)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return DaemonState{}, fmt.Errorf("read daemon state checksum %q: %w", path+".sha256", err)
+		}
 	}
 
 	var st DaemonState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("decode daemon state %q: %w", path, err)
+		return DaemonState{}, fmt.Errorf("decode daemon state %q: %w", path, err)
+	}
+	return st, nil
+}
+
+func (d *Daemon) LoadState(path string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	recoveredFromBackup := false
+	st, err := readAndUnmarshalDaemonState(path, true)
+	if err != nil {
+		bakSt, bakErr := readAndUnmarshalDaemonState(path+".bak", false)
+		if bakErr == nil {
+			st = bakSt
+			recoveredFromBackup = true
+		} else if errors.Is(err, os.ErrNotExist) {
+			if errors.Is(bakErr, os.ErrNotExist) {
+				return nil
+			}
+			return bakErr
+		} else {
+			return err
+		}
 	}
 
 	d.seq = st.Seq
@@ -669,6 +702,12 @@ func (d *Daemon) LoadState(path string) error {
 	d.router.RestoreRoutes(st.Routes)
 	d.storage.RestoreGenerations(st.Generations)
 	d.audit.Restore(st.AuditEvents)
+	if recoveredFromBackup {
+		d.audit.Record(AuditEvent{
+			Type:   "state_recovered_from_backup",
+			Detail: fmt.Sprintf("recovered from %s", path+".bak"),
+		})
+	}
 
 	pool := d.WorkerPool()
 	pool.mu.Lock()
@@ -741,5 +780,14 @@ func (d *Daemon) SaveState(path string) error {
 	if err != nil {
 		return fmt.Errorf("encode daemon state: %w", err)
 	}
-	return writeFileAtomic(path, data, 0o600)
+	if prev, err := os.ReadFile(path); err == nil {
+		if err := writeFileAtomic(path+".bak", prev, 0o600); err != nil {
+			return err
+		}
+	}
+	_, hexSum, err := writeFileAtomicFromReader(path, bytes.NewReader(data), 0o600)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path+".sha256", []byte(hexSum+"\n"), 0o600)
 }

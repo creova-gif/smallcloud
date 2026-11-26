@@ -887,6 +887,112 @@ func TestCanaryEndpoint(t *testing.T) {
 	}
 }
 
+func TestCanaryReconcileEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodPost, "/v1/canary/reconcile", bytes.NewBufferString(`{"org_id":"acme","app_name":"web"}`))
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodPost, "/v1/canary/reconcile", bytes.NewBufferString(`{"org_id":"acme","app_name":"web"}`))
+	missingReq.Header.Set("Authorization", "Bearer secret-token")
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when route missing, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	healthySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer healthySrv.Close()
+
+	healthyStandby := strings.TrimPrefix(healthySrv.URL, "http://")
+	if _, err := d.Router().SwapRoute("acme", "web", "web.smallcloud.dev", "v1", healthyStandby); err != nil {
+		t.Fatalf("SwapRoute v1 failed: %v", err)
+	}
+	if _, err := d.Router().SwapRoute("acme", "web", "web.smallcloud.dev", "v2", "127.0.0.1:9002"); err != nil {
+		t.Fatalf("SwapRoute v2 failed: %v", err)
+	}
+	if _, err := d.Router().SetCanaryWeight("acme", "web", 25); err != nil {
+		t.Fatalf("SetCanaryWeight failed: %v", err)
+	}
+
+	promoteReq := httptest.NewRequest(http.MethodPost, "/v1/canary/reconcile", bytes.NewBufferString(`{"org_id":"acme","app_name":"web","timeout_ms":200}`))
+	promoteReq.Header.Set("Authorization", "Bearer secret-token")
+	promoteRec := httptest.NewRecorder()
+	h.ServeHTTP(promoteRec, promoteReq)
+	if promoteRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on healthy promote, got %d: %s", promoteRec.Code, promoteRec.Body.String())
+	}
+
+	var promoteDecision CanaryDecision
+	if err := json.Unmarshal(promoteRec.Body.Bytes(), &promoteDecision); err != nil {
+		t.Fatalf("unmarshal promote decision: %v", err)
+	}
+	if promoteDecision.Action != "promoted" || !promoteDecision.Healthy {
+		t.Fatalf("expected promoted healthy decision, got %+v", promoteDecision)
+	}
+
+	promotedRoute, ok := d.Router().GetRoute("acme", "web")
+	if !ok {
+		t.Fatal("expected route to exist after promotion")
+	}
+	if promotedRoute.ActiveReleaseID != "v1" || promotedRoute.CanaryWeight != 0 {
+		t.Fatalf("unexpected route after promotion: %+v", promotedRoute)
+	}
+
+	unhealthySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer unhealthySrv.Close()
+
+	d2 := newTestServerDaemon(t)
+	h2 := d2.HandlerWithAuth("secret-token")
+	unhealthyStandby := strings.TrimPrefix(unhealthySrv.URL, "http://")
+	if _, err := d2.Router().SwapRoute("acme", "api", "api.smallcloud.dev", "v1", unhealthyStandby); err != nil {
+		t.Fatalf("SwapRoute v1 failed: %v", err)
+	}
+	if _, err := d2.Router().SwapRoute("acme", "api", "api.smallcloud.dev", "v2", "127.0.0.1:9002"); err != nil {
+		t.Fatalf("SwapRoute v2 failed: %v", err)
+	}
+	if _, err := d2.Router().SetCanaryWeight("acme", "api", 25); err != nil {
+		t.Fatalf("SetCanaryWeight failed: %v", err)
+	}
+
+	rollbackReq := httptest.NewRequest(http.MethodPost, "/v1/canary/reconcile", bytes.NewBufferString(`{"org_id":"acme","app_name":"api","timeout_ms":80}`))
+	rollbackReq.Header.Set("Authorization", "Bearer secret-token")
+	rollbackRec := httptest.NewRecorder()
+	h2.ServeHTTP(rollbackRec, rollbackReq)
+	if rollbackRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on unhealthy rollback, got %d: %s", rollbackRec.Code, rollbackRec.Body.String())
+	}
+
+	var rollbackDecision CanaryDecision
+	if err := json.Unmarshal(rollbackRec.Body.Bytes(), &rollbackDecision); err != nil {
+		t.Fatalf("unmarshal rollback decision: %v", err)
+	}
+	if rollbackDecision.Action != "rolled_back" || rollbackDecision.Healthy || rollbackDecision.Error == "" {
+		t.Fatalf("expected rolled_back unhealthy decision with error, got %+v", rollbackDecision)
+	}
+
+	rolledBackRoute, ok := d2.Router().GetRoute("acme", "api")
+	if !ok {
+		t.Fatal("expected route to exist after rollback")
+	}
+	if rolledBackRoute.ActiveReleaseID != "v2" || rolledBackRoute.CanaryWeight != 0 {
+		t.Fatalf("unexpected route after rollback: %+v", rolledBackRoute)
+	}
+}
+
 func TestLogsEndpoint(t *testing.T) {
 	d := newTestServerDaemon(t)
 	rt := &recordingRuntime{logOut: "line1\nline2\n"}
