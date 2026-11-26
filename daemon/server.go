@@ -11,10 +11,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
+
+var defaultPools sync.Map
 
 const maxRequestBodyBytes = 1 << 20
 
@@ -56,6 +59,20 @@ type pruneRequest struct {
 	KeepLast int    `json:"keep_last"`
 }
 
+type nodeHeartbeatRequest struct {
+	ID         string `json:"id"`
+	ActiveApps int    `json:"active_apps"`
+}
+
+func (d *Daemon) workerPool() *WorkerPool {
+	if pool, ok := defaultPools.Load(d); ok {
+		return pool.(*WorkerPool)
+	}
+	pool := NewWorkerPool()
+	actual, _ := defaultPools.LoadOrStore(d, pool)
+	return actual.(*WorkerPool)
+}
+
 func (d *Daemon) Handler() http.Handler {
 	return d.HandlerWithAuth(os.Getenv("SMALLCLOUD_API_TOKEN"))
 }
@@ -79,6 +96,10 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("GET /v1/org-quota", d.handleGetOrgQuota)
 	mux.HandleFunc("POST /v1/prune", d.handlePrune)
 	mux.HandleFunc("POST /v1/rollover", d.handleRollover)
+	mux.HandleFunc("POST /v1/nodes/register", d.handleNodeRegister)
+	mux.HandleFunc("POST /v1/nodes/heartbeat", d.handleNodeHeartbeat)
+	mux.HandleFunc("GET /v1/nodes", d.handleListNodes)
+	mux.HandleFunc("POST /webhooks/github", d.handleGitHubWebhook)
 
 	if token == "" {
 		return mux
@@ -459,6 +480,91 @@ func (d *Daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]int{
 		"pruned": pruned,
 	})
+}
+
+func (d *Daemon) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
+	var node WorkerNode
+	if !decodeJSONBody(w, r, &node) {
+		return
+	}
+
+	registered, err := d.workerPool().RegisterNode(node)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, registered)
+}
+
+func (d *Daemon) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var req nodeHeartbeatRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	node, err := d.workerPool().Heartbeat(req.ID, req.ActiveApps)
+	if err != nil {
+		if errors.Is(err, ErrNodeNotFound) {
+			writeHTTPError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, node)
+}
+
+func (d *Daemon) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"nodes": d.workerPool().ListNodes(),
+	})
+}
+
+func (d *Daemon) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	secret := os.Getenv("SMALLCLOUD_GITHUB_WEBHOOK_SECRET")
+	if secret == "" {
+		writeHTTPError(w, http.StatusServiceUnavailable, "github webhook secret is not configured")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeHTTPError(w, http.StatusRequestEntityTooLarge, "request body exceeds 1 MiB limit")
+			return
+		}
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := VerifyGitHubSignature(secret, body, r.Header.Get("X-Hub-Signature-256")); err != nil {
+		writeHTTPError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	ev, err := ParseGitHubPushEvent(body)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	orgID := ""
+	appName := ev.Repository
+	if parts := strings.SplitN(ev.Repository, "/", 2); len(parts) == 2 {
+		orgID = parts[0]
+		appName = parts[1]
+	}
+	d.Audit().Record(AuditEvent{
+		Type:      "gitops_push",
+		OrgID:     orgID,
+		AppName:   appName,
+		ReleaseID: ev.CommitSHA,
+		Detail:    fmt.Sprintf("repo=%s branch=%s commit=%s pusher=%s", ev.Repository, ev.Branch, ev.CommitSHA, ev.Pusher),
+	})
+
+	writeHTTPJSON(w, http.StatusOK, ev)
 }
 
 func isValidationError(err error) bool {

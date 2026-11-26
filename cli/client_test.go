@@ -312,3 +312,44 @@ func TestDaemonClientCanaryLogsOrgQuotaAndPrune(t *testing.T) {
 		t.Fatalf("expected 2 pruned snapshots, got %d", pruned)
 	}
 }
+
+func TestDaemonClientNodes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/nodes/register":
+			var req daemon.WorkerNode
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode register node request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(req)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string][]daemon.WorkerNode{
+				"nodes": {{}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	ctx := context.Background()
+
+	if _, err := client.RegisterNode(ctx, daemon.WorkerNode{}); err != nil {
+		t.Fatalf("RegisterNode failed: %v", err)
+	}
+
+	nodes, err := client.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListNodes failed: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(nodes))
+	}
+}

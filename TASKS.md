@@ -27,18 +27,18 @@
 - [x] Signed Budget/Alert Webhooks (HMAC-SHA256 signed webhook delivery on budget thresholds and hard-stop events)
 - [x] Live `doctor --live` TLS & Caddy Admin Probe (active Caddy admin API and TLS certificate verification)
 - [x] Automated Snapshot Pruning & S3/GCS Backup Lifecycle (retention policies and scheduled object-store pruning)
-- [ ] Multi-Node Worker Pool / Edge Routing (multi-host scheduling and edge proxy route synchronization)
+- [x] Multi-Node Worker Pool / Edge Routing (multi-host scheduling and edge proxy route synchronization)
 
 ## Wave 6: Enterprise Control Plane, Multi-Tenant Quotas & Release Lifecycle
 - [x] Org-Level Aggregate Spend Quotas & Soft/Hard Rollup
 - [x] Release Artifact Signing & Checksum Attestation
 - [x] Streaming Container Logs (`smallcloud logs`)
 - [x] Canary Traffic Weighting (`X%` Blue / `Y%` Green)
-- [ ] Multi-Node Worker Pool & Edge Route Sync
+- [x] Multi-Node Worker Pool & Edge Route Sync
 
 ## Wave 7: Distributed Edge, Zero-Trust Mesh & Developer Platform
-- [ ] Multi-Region SQLite Read Replicas
-- [ ] WireGuard Mesh Control-Plane Tunneling
+- [x] Multi-Region SQLite Read Replicas
+- [x] WireGuard Mesh Control-Plane Tunneling
 - [x] GitHub Webhook Git-Push Deployments
 - [x] Interactive App Scaffolding & Plugin Templates
 - [x] Automated Chaos & Canary Auto-Rollback

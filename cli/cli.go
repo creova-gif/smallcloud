@@ -481,7 +481,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|nodes|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -551,7 +551,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune" || cmd == "nodes") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -891,6 +891,16 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			"keep_last": keepLast,
 			"pruned":    pruned,
 		})
+
+	case "nodes":
+		if client == nil {
+			return errors.New("nodes requires SMALLCLOUD_DAEMON_URL to be set")
+		}
+		nodes, err := client.ListNodes(context.Background())
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]any{"nodes": nodes})
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)

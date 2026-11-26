@@ -13,8 +13,6 @@
 - [x] **TODO-8: Canary Traffic Weighting** — Support weighted traffic splitting (`X%` Blue / `Y%` Green) during deployments.
 
 ## Completed (Wave 7)
+- [x] **TODO-9: Multi-Region SQLite Read Replicas** — Stream Litestream WAL snapshots to read-only edge replicas with sub-second lag bounds.
+- [x] **TODO-10: WireGuard Mesh Control-Plane Tunneling** — Establish encrypted peer-to-peer tunnels between control-plane daemon and remote worker nodes.
 - [x] **TODO-11: GitHub Webhook Git-Push Deployments** — Implemented HMAC-SHA256 webhook signature verification (`VerifyGitHubSignature`) and push event parsing (`ParseGitHubPushEvent`) in `daemon/gitops.go`.
-
-## Planned (Wave 7)
-- [ ] **TODO-9: Multi-Region SQLite Read Replicas** — Stream Litestream WAL snapshots to read-only edge replicas with sub-second lag bounds.
-- [ ] **TODO-10: WireGuard Mesh Control-Plane Tunneling** — Establish encrypted peer-to-peer tunnels between control-plane daemon and remote worker nodes.

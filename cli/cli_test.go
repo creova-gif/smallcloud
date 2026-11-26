@@ -851,3 +851,45 @@ func TestCLIRemoteCanaryLogsOrgQuotaAndPrune(t *testing.T) {
 		t.Fatalf("unexpected remote prune output: %+v", pruneRes)
 	}
 }
+
+func TestCLIRemoteNodes(t *testing.T) {
+	t.Setenv("SMALLCLOUD_DAEMON_URL", "")
+	if err := Run([]string{"nodes"}, t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected nodes without SMALLCLOUD_DAEMON_URL to fail")
+	}
+
+	const token = "cli-remote-nodes-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/nodes" {
+			_ = json.NewEncoder(w).Encode(map[string][]daemon.WorkerNode{
+				"nodes": {{}},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+
+	var out bytes.Buffer
+	if err := Run([]string{"nodes"}, t.TempDir(), &out); err != nil {
+		t.Fatalf("remote nodes failed: %v", err)
+	}
+	var res struct {
+		Nodes []daemon.WorkerNode `json:"nodes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal remote nodes: %v", err)
+	}
+	if len(res.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(res.Nodes))
+	}
+}

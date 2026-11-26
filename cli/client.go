@@ -325,3 +325,21 @@ func (c *DaemonClient) PruneSnapshots(ctx context.Context, orgID, appName string
 	}
 	return out.Pruned, nil
 }
+
+func (c *DaemonClient) RegisterNode(ctx context.Context, node daemon.WorkerNode) (daemon.WorkerNode, error) {
+	var out daemon.WorkerNode
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/nodes/register", node, &out); err != nil {
+		return daemon.WorkerNode{}, err
+	}
+	return out, nil
+}
+
+func (c *DaemonClient) ListNodes(ctx context.Context) ([]daemon.WorkerNode, error) {
+	var out struct {
+		Nodes []daemon.WorkerNode `json:"nodes"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/nodes", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Nodes, nil
+}

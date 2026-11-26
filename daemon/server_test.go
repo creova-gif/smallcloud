@@ -3,6 +3,9 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1101,5 +1104,131 @@ func TestPruneEndpoint(t *testing.T) {
 	}
 	if len(remaining) != 1 || remaining[0].Generation != 3 {
 		t.Fatalf("expected only generation 3 remaining, got %+v", remaining)
+	}
+}
+
+func TestWorkerNodesEndpoints(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/v1/nodes", nil)
+	unauthRec := httptest.NewRecorder()
+	h.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", unauthRec.Code)
+	}
+
+	regReq := httptest.NewRequest(http.MethodPost, "/v1/nodes/register", bytes.NewBufferString(`{"id":"worker-1","address":"10.0.1.10:8080","region":"us-east"}`))
+	regReq.Header.Set("Authorization", "Bearer secret-token")
+	regRec := httptest.NewRecorder()
+	h.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on register, got %d: %s", regRec.Code, regRec.Body.String())
+	}
+	var regNode WorkerNode
+	if err := json.Unmarshal(regRec.Body.Bytes(), &regNode); err != nil {
+		t.Fatalf("unmarshal register response: %v", err)
+	}
+	if regNode.ID != "worker-1" || regNode.MaxApps != defaultWorkerMaxApps || !regNode.Healthy {
+		t.Fatalf("unexpected registered node: %+v", regNode)
+	}
+
+	badRegReq := httptest.NewRequest(http.MethodPost, "/v1/nodes/register", bytes.NewBufferString(`{"id":"","address":"10.0.1.10:8080"}`))
+	badRegReq.Header.Set("Authorization", "Bearer secret-token")
+	badRegRec := httptest.NewRecorder()
+	h.ServeHTTP(badRegRec, badRegReq)
+	if badRegRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid register, got %d", badRegRec.Code)
+	}
+
+	hbReq := httptest.NewRequest(http.MethodPost, "/v1/nodes/heartbeat", bytes.NewBufferString(`{"id":"worker-1","active_apps":4}`))
+	hbReq.Header.Set("Authorization", "Bearer secret-token")
+	hbRec := httptest.NewRecorder()
+	h.ServeHTTP(hbRec, hbReq)
+	if hbRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on heartbeat, got %d: %s", hbRec.Code, hbRec.Body.String())
+	}
+	var hbNode WorkerNode
+	if err := json.Unmarshal(hbRec.Body.Bytes(), &hbNode); err != nil {
+		t.Fatalf("unmarshal heartbeat response: %v", err)
+	}
+	if hbNode.ActiveApps != 4 {
+		t.Fatalf("expected active_apps=4, got %d", hbNode.ActiveApps)
+	}
+
+	missingHbReq := httptest.NewRequest(http.MethodPost, "/v1/nodes/heartbeat", bytes.NewBufferString(`{"id":"missing","active_apps":1}`))
+	missingHbReq.Header.Set("Authorization", "Bearer secret-token")
+	missingHbRec := httptest.NewRecorder()
+	h.ServeHTTP(missingHbRec, missingHbReq)
+	if missingHbRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on missing heartbeat node, got %d", missingHbRec.Code)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/nodes", nil)
+	listReq.Header.Set("Authorization", "Bearer secret-token")
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on list nodes, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+	var listResp struct {
+		Nodes []WorkerNode `json:"nodes"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal list nodes response: %v", err)
+	}
+	if len(listResp.Nodes) != 1 || listResp.Nodes[0].ID != "worker-1" || listResp.Nodes[0].ActiveApps != 4 {
+		t.Fatalf("unexpected listed nodes: %+v", listResp.Nodes)
+	}
+}
+
+func TestGitHubWebhookEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret-token")
+
+	t.Setenv("SMALLCLOUD_GITHUB_WEBHOOK_SECRET", "")
+	unconfiguredReq := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewBufferString(`{}`))
+	unconfiguredRec := httptest.NewRecorder()
+	h.ServeHTTP(unconfiguredRec, unconfiguredReq)
+	if unconfiguredRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when webhook secret is unset, got %d: %s", unconfiguredRec.Code, unconfiguredRec.Body.String())
+	}
+
+	const webhookSecret = "gh-webhook-secret"
+	t.Setenv("SMALLCLOUD_GITHUB_WEBHOOK_SECRET", webhookSecret)
+
+	payload := []byte(`{"ref":"refs/heads/main","after":"abc1234567890","repository":{"full_name":"acme/web"},"pusher":{"name":"alice"}}`)
+
+	badSigReq := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	badSigReq.Header.Set("X-Hub-Signature-256", "sha256=deadbeef")
+	badSigRec := httptest.NewRecorder()
+	h.ServeHTTP(badSigRec, badSigReq)
+	if badSigRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on invalid signature, got %d: %s", badSigRec.Code, badSigRec.Body.String())
+	}
+
+	mac := hmac.New(sha256.New, []byte(webhookSecret))
+	mac.Write(payload)
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	validReq := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	validReq.Header.Set("X-Hub-Signature-256", sig)
+	validRec := httptest.NewRecorder()
+	h.ServeHTTP(validRec, validReq)
+	if validRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on valid webhook, got %d: %s", validRec.Code, validRec.Body.String())
+	}
+
+	var ev GitPushEvent
+	if err := json.Unmarshal(validRec.Body.Bytes(), &ev); err != nil {
+		t.Fatalf("unmarshal webhook response: %v", err)
+	}
+	if ev.Repository != "acme/web" || ev.Branch != "main" || ev.CommitSHA != "abc1234567890" || ev.Pusher != "alice" {
+		t.Fatalf("unexpected webhook event: %+v", ev)
+	}
+
+	events := d.Audit().List("acme", "web", 0)
+	if len(events) != 1 || events[0].Type != "gitops_push" || events[0].ReleaseID != "abc1234567890" {
+		t.Fatalf("expected gitops_push audit event, got %+v", events)
 	}
 }
