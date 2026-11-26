@@ -72,6 +72,47 @@ func TestAuditLogFilteringAndLimit(t *testing.T) {
 	}
 }
 
+func TestAuditLogListFilteredByType(t *testing.T) {
+	log := NewAuditLog(200)
+
+	log.Record(AuditEvent{Type: "deploy", OrgID: "acme", AppName: "api", ReleaseID: "r1"})
+	log.Record(AuditEvent{Type: "deploy", OrgID: "acme", AppName: "web", ReleaseID: "r2"})
+	log.Record(AuditEvent{Type: "deploy", OrgID: "beta", AppName: "api", ReleaseID: "r3"})
+	log.Record(AuditEvent{Type: "rollback", OrgID: "acme", AppName: "api", ReleaseID: "r0"})
+	log.Record(AuditEvent{Type: "deploy", OrgID: "acme", AppName: "api", ReleaseID: "r4"})
+
+	deploys := log.ListFiltered("", "", "deploy", 0)
+	if len(deploys) != 4 {
+		t.Fatalf("expected 4 deploy events, got %d", len(deploys))
+	}
+
+	acmeAPIDeploys := log.ListFiltered("acme", "api", "deploy", 0)
+	if len(acmeAPIDeploys) != 2 {
+		t.Fatalf("expected 2 acme/api deploy events, got %d", len(acmeAPIDeploys))
+	}
+	if acmeAPIDeploys[0].ReleaseID != "r4" || acmeAPIDeploys[1].ReleaseID != "r1" {
+		t.Fatalf("unexpected acme/api deploy order: %+v", acmeAPIDeploys)
+	}
+
+	limitedDeploys := log.ListFiltered("acme", "", "deploy", 2)
+	if len(limitedDeploys) != 2 {
+		t.Fatalf("expected 2 limited deploy events, got %d", len(limitedDeploys))
+	}
+	if limitedDeploys[0].ReleaseID != "r4" || limitedDeploys[1].ReleaseID != "r2" {
+		t.Fatalf("unexpected limited deploy order: %+v", limitedDeploys)
+	}
+
+	rollbacks := log.ListFiltered("acme", "api", "rollback", 0)
+	if len(rollbacks) != 1 || rollbacks[0].ReleaseID != "r0" {
+		t.Fatalf("expected 1 acme/api rollback event r0, got %+v", rollbacks)
+	}
+
+	missingType := log.ListFiltered("acme", "api", "delete", 0)
+	if len(missingType) != 0 || missingType == nil {
+		t.Fatalf("expected non-nil empty slice for missing type, got %#v", missingType)
+	}
+}
+
 func TestAuditLogSnapshotAndRestoreIsolation(t *testing.T) {
 	log := NewAuditLog(10)
 	ts := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)

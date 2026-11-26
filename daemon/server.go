@@ -270,6 +270,7 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	orgID := q.Get("org_id")
 	appName := q.Get("app")
+	eventType := strings.TrimSpace(r.URL.Query().Get("type"))
 	limit := 0
 	if rawLimit := q.Get("limit"); rawLimit != "" {
 		parsed, err := strconv.Atoi(rawLimit)
@@ -280,7 +281,7 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
-		"events": d.Audit().List(orgID, appName, limit),
+		"events": d.Audit().ListFiltered(orgID, appName, eventType, limit),
 	})
 }
 

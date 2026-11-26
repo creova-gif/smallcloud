@@ -486,6 +486,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 		wg.Wait()
+		_, _ = d.SyncAllWAL()
 		if err := d.SaveState(statePath); err != nil {
 			return err
 		}

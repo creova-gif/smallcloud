@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/creova-gif/smallcloud/daemon"
+	"github.com/creova-gif/smallcloud/pkg/config"
 )
 
 func TestPackageFastAPITemplate(t *testing.T) {
@@ -153,6 +154,72 @@ func TestCLIServeGracefulShutdownAndPersist(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "state.json")); err != nil {
 		t.Fatalf("expected state.json persisted on shutdown: %v", err)
+	}
+}
+
+func TestCLIServeGracefulShutdownSyncsWAL(t *testing.T) {
+	stateDir := t.TempDir()
+	statePath := filepath.Join(stateDir, "state.json")
+	replicaDir := filepath.Join(stateDir, "replicas")
+
+	seed := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), replicaDir)
+	cfg := &config.Config{
+		App: config.AppConfig{
+			Name:        "wal-app",
+			OrgID:       "org-wal",
+			Domain:      "wal.smallcloud.dev",
+			Port:        8000,
+			Healthcheck: "/healthz",
+			Runtime:     "dockerfile",
+		},
+		Resources: config.ResourcesConfig{
+			CPUMillicores: 250,
+			MemoryMB:      128,
+		},
+		Budget: config.BudgetConfig{
+			MaxMonthlyUSD: 5.0,
+			AlertAtPct:    80.0,
+			HardStop:      true,
+		},
+		Storage: config.StorageConfig{
+			SQLitePath: "/data/wal.db",
+			SyncMs:     1000,
+		},
+	}
+	if _, err := seed.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("seed deploy failed: %v", err)
+	}
+	if err := seed.SaveState(statePath); err != nil {
+		t.Fatalf("seed SaveState failed: %v", err)
+	}
+
+	hostDBPath := filepath.Join(replicaDir, "hostdata", "org-wal", "wal-app", "wal.db")
+	if err := os.MkdirAll(filepath.Dir(hostDBPath), 0o755); err != nil {
+		t.Fatalf("mkdir hostDBPath: %v", err)
+	}
+	payload := []byte("wal-shutdown-flush-data")
+	if err := os.WriteFile(hostDBPath, payload, 0o600); err != nil {
+		t.Fatalf("write hostDBPath: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	var out bytes.Buffer
+	if err := ServeWithContext(ctx, "127.0.0.1:0", stateDir, &out); err != nil {
+		t.Fatalf("ServeWithContext failed: %v", err)
+	}
+
+	reloaded := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), replicaDir)
+	if err := reloaded.LoadState(statePath); err != nil {
+		t.Fatalf("reload state failed: %v", err)
+	}
+	status, err := reloaded.Status("org-wal", "wal-app")
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.LastSnapshot == nil || status.LastSnapshot.SizeBytes != int64(len(payload)) {
+		t.Fatalf("expected WAL snapshot synced on shutdown, got %+v", status.LastSnapshot)
 	}
 }
 

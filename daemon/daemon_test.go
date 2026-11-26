@@ -737,3 +737,96 @@ func TestDaemonConcurrentMultiTenantDeploys(t *testing.T) {
 		t.Fatalf("unexpected org-a result: %+v", resA.res)
 	}
 }
+
+func TestDaemonSyncAllWAL(t *testing.T) {
+	emptyDaemon := NewDaemon(t.TempDir(), t.TempDir())
+	synced, err := emptyDaemon.SyncAllWAL()
+	if err != nil {
+		t.Fatalf("empty SyncAllWAL failed: %v", err)
+	}
+	if synced != 0 {
+		t.Fatalf("expected 0 synced on empty daemon, got %d", synced)
+	}
+
+	d := NewDaemon(t.TempDir(), t.TempDir())
+
+	cfgA := sampleConfig()
+	cfgA.App.OrgID = "org-a"
+	cfgA.App.Name = "app-one"
+	cfgA.App.Domain = "one.smallcloud.dev"
+	cfgA.Storage.SQLitePath = "/data/one.db"
+
+	cfgB := sampleConfig()
+	cfgB.App.OrgID = "org-b"
+	cfgB.App.Name = "app-two"
+	cfgB.App.Domain = "two.smallcloud.dev"
+	cfgB.Storage.SQLitePath = "/data/two.db"
+
+	cfgNoDB := sampleConfig()
+	cfgNoDB.App.OrgID = "org-c"
+	cfgNoDB.App.Name = "app-stateless"
+	cfgNoDB.App.Domain = "stateless.smallcloud.dev"
+	cfgNoDB.Storage.SQLitePath = "/data/missing.db"
+
+	if _, err := d.Deploy(cfgA, "v1.0.0"); err != nil {
+		t.Fatalf("deploy cfgA failed: %v", err)
+	}
+	if _, err := d.Deploy(cfgB, "v1.0.0"); err != nil {
+		t.Fatalf("deploy cfgB failed: %v", err)
+	}
+	if _, err := d.Deploy(cfgNoDB, "v1.0.0"); err != nil {
+		t.Fatalf("deploy cfgNoDB failed: %v", err)
+	}
+
+	pathA := d.resolveHostSQLitePath(cfgA.App.OrgID, cfgA.App.Name, cfgA.Storage.SQLitePath)
+	if err := os.MkdirAll(filepath.Dir(pathA), 0o755); err != nil {
+		t.Fatalf("mkdir pathA: %v", err)
+	}
+	payloadA := []byte("sqlite-payload-app-one")
+	if err := os.WriteFile(pathA, payloadA, 0o600); err != nil {
+		t.Fatalf("write pathA: %v", err)
+	}
+
+	pathB := d.resolveHostSQLitePath(cfgB.App.OrgID, cfgB.App.Name, cfgB.Storage.SQLitePath)
+	if err := os.MkdirAll(filepath.Dir(pathB), 0o755); err != nil {
+		t.Fatalf("mkdir pathB: %v", err)
+	}
+	payloadB := []byte("sqlite-payload-app-two-longer")
+	if err := os.WriteFile(pathB, payloadB, 0o600); err != nil {
+		t.Fatalf("write pathB: %v", err)
+	}
+
+	synced, err = d.SyncAllWAL()
+	if err != nil {
+		t.Fatalf("SyncAllWAL failed: %v", err)
+	}
+	if synced != 2 {
+		t.Fatalf("expected 2 synced snapshots, got %d", synced)
+	}
+
+	if !d.storage.HasReplica(cfgA.App.OrgID, cfgA.App.Name) {
+		t.Fatal("expected replica for org-a/app-one")
+	}
+	if !d.storage.HasReplica(cfgB.App.OrgID, cfgB.App.Name) {
+		t.Fatal("expected replica for org-b/app-two")
+	}
+	if d.storage.HasReplica(cfgNoDB.App.OrgID, cfgNoDB.App.Name) {
+		t.Fatal("expected no replica for stateless app")
+	}
+
+	statusA, err := d.Status(cfgA.App.OrgID, cfgA.App.Name)
+	if err != nil {
+		t.Fatalf("statusA failed: %v", err)
+	}
+	if statusA.LastSnapshot == nil || statusA.LastSnapshot.SizeBytes != int64(len(payloadA)) {
+		t.Fatalf("unexpected statusA snapshot: %+v", statusA.LastSnapshot)
+	}
+
+	statusB, err := d.Status(cfgB.App.OrgID, cfgB.App.Name)
+	if err != nil {
+		t.Fatalf("statusB failed: %v", err)
+	}
+	if statusB.LastSnapshot == nil || statusB.LastSnapshot.SizeBytes != int64(len(payloadB)) {
+		t.Fatalf("unexpected statusB snapshot: %+v", statusB.LastSnapshot)
+	}
+}

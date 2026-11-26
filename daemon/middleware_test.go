@@ -106,6 +106,8 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	expectedCSP := "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'"
+
 	reqOpen := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	recOpen := httptest.NewRecorder()
 	h.ServeHTTP(recOpen, reqOpen)
@@ -118,6 +120,9 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	if recOpen.Header().Get("Referrer-Policy") != "no-referrer" {
 		t.Fatalf("expected Referrer-Policy no-referrer, got %q", recOpen.Header().Get("Referrer-Policy"))
 	}
+	if recOpen.Header().Get("Content-Security-Policy") != expectedCSP {
+		t.Fatalf("expected Content-Security-Policy %q, got %q", expectedCSP, recOpen.Header().Get("Content-Security-Policy"))
+	}
 	if recOpen.Header().Get("Cache-Control") != "" {
 		t.Fatalf("expected empty Cache-Control on non-/v1/ path, got %q", recOpen.Header().Get("Cache-Control"))
 	}
@@ -125,6 +130,9 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	reqV1 := httptest.NewRequest(http.MethodGet, "/v1/apps", nil)
 	recV1 := httptest.NewRecorder()
 	h.ServeHTTP(recV1, reqV1)
+	if recV1.Header().Get("Content-Security-Policy") != expectedCSP {
+		t.Fatalf("expected Content-Security-Policy %q on /v1/ path, got %q", expectedCSP, recV1.Header().Get("Content-Security-Policy"))
+	}
 	if recV1.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("expected Cache-Control no-store on /v1/ path, got %q", recV1.Header().Get("Cache-Control"))
 	}

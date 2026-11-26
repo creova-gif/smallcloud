@@ -563,6 +563,55 @@ func TestEventsEndpoint(t *testing.T) {
 		t.Fatalf("expected 3 acme events, got %d", len(allAcmeResp.Events))
 	}
 
+	d.Audit().Record(AuditEvent{
+		Type:      "rollback",
+		OrgID:     "acme",
+		AppName:   "api",
+		ReleaseID: "rel-a",
+	})
+
+	deployTypeReq := httptest.NewRequest(http.MethodGet, "/v1/events?type=deploy", nil)
+	deployTypeReq.Header.Set("Authorization", "Bearer secret-token")
+	deployTypeRec := httptest.NewRecorder()
+	h.ServeHTTP(deployTypeRec, deployTypeReq)
+	if deployTypeRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", deployTypeRec.Code, deployTypeRec.Body.String())
+	}
+	var deployTypeResp struct {
+		Events []AuditEvent `json:"events"`
+	}
+	if err := json.Unmarshal(deployTypeRec.Body.Bytes(), &deployTypeResp); err != nil {
+		t.Fatalf("unmarshal deploy events: %v", err)
+	}
+	if len(deployTypeResp.Events) != 3 {
+		t.Fatalf("expected 3 deploy events, got %d", len(deployTypeResp.Events))
+	}
+	for _, ev := range deployTypeResp.Events {
+		if ev.Type != "deploy" {
+			t.Fatalf("expected deploy event type, got %+v", ev)
+		}
+	}
+
+	rollbackTypeReq := httptest.NewRequest(http.MethodGet, "/v1/events?type=rollback", nil)
+	rollbackTypeReq.Header.Set("Authorization", "Bearer secret-token")
+	rollbackTypeRec := httptest.NewRecorder()
+	h.ServeHTTP(rollbackTypeRec, rollbackTypeReq)
+	if rollbackTypeRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rollbackTypeRec.Code, rollbackTypeRec.Body.String())
+	}
+	var rollbackTypeResp struct {
+		Events []AuditEvent `json:"events"`
+	}
+	if err := json.Unmarshal(rollbackTypeRec.Body.Bytes(), &rollbackTypeResp); err != nil {
+		t.Fatalf("unmarshal rollback events: %v", err)
+	}
+	if len(rollbackTypeResp.Events) != 1 {
+		t.Fatalf("expected 1 rollback event, got %d", len(rollbackTypeResp.Events))
+	}
+	if rollbackTypeResp.Events[0].Type != "rollback" || rollbackTypeResp.Events[0].ReleaseID != "rel-a" {
+		t.Fatalf("unexpected rollback event: %+v", rollbackTypeResp.Events[0])
+	}
+
 	badLimitReq := httptest.NewRequest(http.MethodGet, "/v1/events?limit=abc", nil)
 	badLimitReq.Header.Set("Authorization", "Bearer secret-token")
 	badLimitRec := httptest.NewRecorder()

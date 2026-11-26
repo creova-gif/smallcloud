@@ -58,6 +58,10 @@ func (a *AuditLog) Record(event AuditEvent) AuditEvent {
 }
 
 func (a *AuditLog) List(orgID, appName string, limit int) []AuditEvent {
+	return a.ListFiltered(orgID, appName, "", limit)
+}
+
+func (a *AuditLog) ListFiltered(orgID, appName, eventType string, limit int) []AuditEvent {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -68,6 +72,9 @@ func (a *AuditLog) List(orgID, appName string, limit int) []AuditEvent {
 			continue
 		}
 		if appName != "" && ev.AppName != appName {
+			continue
+		}
+		if eventType != "" && ev.Type != eventType {
 			continue
 		}
 		out = append(out, ev)

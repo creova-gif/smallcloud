@@ -235,6 +235,46 @@ func (d *Daemon) syncWALIfPresent(orgID, appName string) (*SnapshotMetadata, err
 	return nil, nil
 }
 
+func (d *Daemon) SyncAllWAL() (int, error) {
+	type appPair struct {
+		orgID   string
+		appName string
+	}
+
+	d.metaMu.RLock()
+	pairs := make([]appPair, 0, len(d.appMeta))
+	for _, meta := range d.appMeta {
+		pairs = append(pairs, appPair{
+			orgID:   meta.OrgID,
+			appName: meta.AppName,
+		})
+	}
+	d.metaMu.RUnlock()
+
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].orgID != pairs[j].orgID {
+			return pairs[i].orgID < pairs[j].orgID
+		}
+		return pairs[i].appName < pairs[j].appName
+	})
+
+	synced := 0
+	var errs []error
+	for _, p := range pairs {
+		unlock := d.lockTenant(p.orgID, p.appName)
+		snap, err := d.syncWALIfPresent(p.orgID, p.appName)
+		unlock()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if snap != nil {
+			synced++
+		}
+	}
+	return synced, errors.Join(errs...)
+}
+
 func (d *Daemon) recordSnapshot(orgID, appName string, snap *SnapshotMetadata) {
 	if snap == nil {
 		return
