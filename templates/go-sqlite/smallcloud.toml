@@ -1,0 +1,21 @@
+[app]
+name = "go-starter"
+org_id = "org-indie-default"
+domain = "go-starter.smallcloud.dev"
+port = 8080
+healthcheck = "/healthz"
+runtime = "dockerfile"
+
+[resources]
+cpu_millicores = 500
+memory_mb = 256
+
+[budget]
+max_monthly_usd = 5.00
+alert_at_pct = 80.0
+hard_stop = true
+
+[storage]
+sqlite_path = "/data/app.db"
+replica_url = "gs://smallcloud-replicas/org-indie-default/go-starter"
+sync_ms = 1000

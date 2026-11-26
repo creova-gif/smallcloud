@@ -380,3 +380,53 @@ func TestDockerRuntimeReadinessProbeFailureCleansUpContainer(t *testing.T) {
 		t.Fatalf("expected cleanup command %v, got %v", expectedStop, calls[2].args)
 	}
 }
+
+func TestDockerRuntimeStartSortedEnv(t *testing.T) {
+	var calls []recordedCommand
+	rt := DockerRuntime{
+		CommandRunner: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, recordedCommand{
+				name: name,
+				args: append([]string(nil), args...),
+			})
+			return []byte("ok"), nil
+		},
+	}
+
+	spec := ContainerSpec{
+		OrgID:         "acme",
+		AppName:       "billing",
+		ReleaseID:     "rel-env",
+		AppDir:        "/srv/apps/billing",
+		Port:          18042,
+		CPUMillicores: 500,
+		MemoryMB:      256,
+		Env: map[string]string{
+			"ZEBRA":  "last",
+			"ALPHA":  "first",
+			"MIDDLE": "mid",
+		},
+	}
+
+	if _, err := rt.Start(context.Background(), spec); err != nil {
+		t.Fatalf("DockerRuntime.Start failed: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 commands (build + run), got %d", len(calls))
+	}
+
+	runArgs := calls[1].args
+	expectedTail := []string{
+		"-e", "ALPHA=first",
+		"-e", "MIDDLE=mid",
+		"-e", "ZEBRA=last",
+		"smallcloud-acme-billing:rel-env",
+	}
+	if len(runArgs) < len(expectedTail) {
+		t.Fatalf("run args too short: %v", runArgs)
+	}
+	gotTail := runArgs[len(runArgs)-len(expectedTail):]
+	if !slices.Equal(gotTail, expectedTail) {
+		t.Fatalf("expected sorted env flags before image arg %v, got %v (full args: %v)", expectedTail, gotTail, runArgs)
+	}
+}

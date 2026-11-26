@@ -362,12 +362,27 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 		}
 		rolloverInterval = parsed
 	}
+	var probeTimeout time.Duration
+	if raw := strings.TrimSpace(os.Getenv("SMALLCLOUD_HEALTH_PROBE_TIMEOUT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("invalid SMALLCLOUD_HEALTH_PROBE_TIMEOUT %q: %w", raw, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("SMALLCLOUD_HEALTH_PROBE_TIMEOUT must be > 0, got %s", parsed)
+		}
+		probeTimeout = parsed
+	}
 	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
 	if caddyURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_CADDY_ADMIN_URL")); caddyURL != "" {
 		d.Router().SetApplier(daemon.HTTPAdminApplier{AdminURL: caddyURL})
 	}
 	if strings.TrimSpace(os.Getenv("SMALLCLOUD_RUNTIME")) == "docker" {
-		d.SetRuntime(&daemon.DockerRuntime{})
+		rt := &daemon.DockerRuntime{}
+		if probeTimeout > 0 {
+			rt.HealthProbeTimeout = probeTimeout
+		}
+		d.SetRuntime(rt)
 	}
 	statePath := filepath.Join(stateDir, "state.json")
 	if err := d.LoadState(statePath); err != nil {
@@ -438,7 +453,7 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|meter|rollover|list|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|meter|rollover|list|destroy|events|serve|eval> [args]")
 	}
 
 	cmd := args[0]
@@ -478,7 +493,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -614,6 +629,52 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 			return writeJSON(stdout, map[string]any{"apps": apps})
 		}
 		return writeJSON(stdout, map[string]any{"apps": d.ListApps()})
+
+	case "destroy":
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		if client != nil {
+			if err := client.DeleteApp(context.Background(), cfg.App.OrgID, cfg.App.Name); err != nil {
+				return err
+			}
+		} else {
+			if err := d.DeleteApp(cfg.App.OrgID, cfg.App.Name); err != nil {
+				return err
+			}
+			if err := d.SaveState(statePath); err != nil {
+				return err
+			}
+		}
+		return writeJSON(stdout, map[string]any{
+			"deleted":  true,
+			"org_id":   cfg.App.OrgID,
+			"app_name": cfg.App.Name,
+		})
+
+	case "events":
+		var orgID, appName string
+		if len(args) > 1 {
+			cfg, err := config.LoadFile(filepath.Join(args[1], "smallcloud.toml"))
+			if err != nil {
+				return err
+			}
+			orgID = cfg.App.OrgID
+			appName = cfg.App.Name
+		}
+		if client != nil {
+			events, err := client.Events(context.Background(), orgID, appName, 50)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, map[string]any{"events": events})
+		}
+		return writeJSON(stdout, map[string]any{"events": d.Audit().List(orgID, appName, 50)})
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)

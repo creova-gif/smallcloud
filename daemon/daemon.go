@@ -38,6 +38,7 @@ type DaemonState struct {
 	Generations map[string]int               `json:"generations"`
 	Snapshots   map[string]*SnapshotMetadata `json:"snapshots"`
 	AppMeta     map[string]AppMeta           `json:"app_meta"`
+	AuditEvents []AuditEvent                 `json:"audit_events,omitempty"`
 }
 
 type DeploymentResult struct {
@@ -62,6 +63,7 @@ type Daemon struct {
 	storage   *StorageManager
 	router    *CaddyRouter
 	runtime   ContainerRuntime
+	audit     *AuditLog
 	seq       int
 	appMeta   map[string]AppMeta
 	snapshots map[string]*SnapshotMetadata
@@ -73,6 +75,7 @@ func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
 		storage:   NewStorageManager(replicaRoot),
 		router:    NewCaddyRouter(),
 		runtime:   NoopRuntime{},
+		audit:     NewAuditLog(defaultAuditMaxEvents),
 		appMeta:   make(map[string]AppMeta),
 		snapshots: make(map[string]*SnapshotMetadata),
 	}
@@ -83,9 +86,19 @@ func NewDaemon(cgroupRoot, replicaRoot string) *Daemon {
 			if route, ok := d.router.GetRoute(orgID, appName); ok && route.ActiveReleaseID != "" {
 				_ = d.Runtime().Stop(context.Background(), orgID, appName, route.ActiveReleaseID)
 			}
+			d.audit.Record(AuditEvent{
+				Type:    "budget_halted",
+				OrgID:   orgID,
+				AppName: appName,
+			})
 		},
 		func(orgID, appName string) {
 			_ = d.router.ResumeRoute(orgID, appName)
+			d.audit.Record(AuditEvent{
+				Type:    "budget_unhalted",
+				OrgID:   orgID,
+				AppName: appName,
+			})
 		},
 	)
 	return d
@@ -95,6 +108,7 @@ func (d *Daemon) Budget() *BudgetTracker   { return d.budget }
 func (d *Daemon) Cgroups() *CgroupManager  { return d.cgroups }
 func (d *Daemon) Storage() *StorageManager { return d.storage }
 func (d *Daemon) Router() *CaddyRouter     { return d.router }
+func (d *Daemon) Audit() *AuditLog         { return d.audit }
 
 func (d *Daemon) SetRuntime(rt ContainerRuntime) {
 	d.metaMu.Lock()
@@ -244,6 +258,14 @@ func (d *Daemon) Deploy(cfg *config.Config, releaseID string) (*DeploymentResult
 
 	budgetState, _ := d.budget.State(cfg.App.OrgID, cfg.App.Name)
 
+	d.audit.Record(AuditEvent{
+		Type:      "deploy",
+		OrgID:     cfg.App.OrgID,
+		AppName:   cfg.App.Name,
+		ReleaseID: releaseID,
+		Detail:    fmt.Sprintf("color=%s upstream=%s", route.ActiveColor, upstream),
+	})
+
 	return &DeploymentResult{
 		OrgID:        cfg.App.OrgID,
 		AppName:      cfg.App.Name,
@@ -278,7 +300,18 @@ func (d *Daemon) Rollback(orgID, appName string) (RouteEntry, error) {
 		return RouteEntry{}, err
 	}
 
-	return d.router.Rollback(orgID, appName)
+	route, err := d.router.Rollback(orgID, appName)
+	if err != nil {
+		return RouteEntry{}, err
+	}
+	d.audit.Record(AuditEvent{
+		Type:      "rollback",
+		OrgID:     orgID,
+		AppName:   appName,
+		ReleaseID: route.ActiveReleaseID,
+		Detail:    fmt.Sprintf("color=%s upstream=%s", route.ActiveColor, route.ActiveUpstream),
+	})
+	return route, nil
 }
 
 func (d *Daemon) RecordSpend(orgID, appName string, deltaUSD float64) (AppBudgetState, error) {
@@ -292,14 +325,78 @@ func (d *Daemon) SetMaxBudget(orgID, appName string, maxMonthlyUSD float64) (App
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	return d.budget.SetMaxBudget(orgID, appName, maxMonthlyUSD)
+	st, err := d.budget.SetMaxBudget(orgID, appName, maxMonthlyUSD)
+	if err != nil {
+		return AppBudgetState{}, err
+	}
+	d.audit.Record(AuditEvent{
+		Type:    "budget_updated",
+		OrgID:   orgID,
+		AppName: appName,
+		Detail:  fmt.Sprintf("max_monthly_usd=%.2f", maxMonthlyUSD),
+	})
+	return st, nil
 }
 
 func (d *Daemon) RolloverAll(now time.Time) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	return d.budget.RolloverAll(now)
+	count := d.budget.RolloverAll(now)
+	if count > 0 {
+		d.audit.Record(AuditEvent{
+			Type:   "rollover",
+			Detail: fmt.Sprintf("rolled_over=%d month=%s", count, now.UTC().Format("2006-01")),
+		})
+	}
+	return count
+}
+
+func (d *Daemon) DeleteApp(orgID, appName string) error {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	key := tenantKey(orgID, appName)
+	route, hasRoute := d.router.GetRoute(orgID, appName)
+	d.metaMu.RLock()
+	_, hasMeta := d.appMeta[key]
+	d.metaMu.RUnlock()
+
+	if !hasRoute && !hasMeta {
+		return fmt.Errorf("%w for %s/%s", ErrNoRouteFound, orgID, appName)
+	}
+
+	if hasRoute {
+		rt := d.Runtime()
+		if route.ActiveReleaseID != "" {
+			_ = rt.Stop(context.Background(), orgID, appName, route.ActiveReleaseID)
+		}
+		if route.StandbyReleaseID != "" && route.StandbyReleaseID != route.ActiveReleaseID {
+			_ = rt.Stop(context.Background(), orgID, appName, route.StandbyReleaseID)
+		}
+	}
+
+	d.router.DeleteRoute(orgID, appName)
+
+	d.metaMu.Lock()
+	delete(d.appMeta, key)
+	delete(d.snapshots, key)
+	d.metaMu.Unlock()
+
+	_ = os.RemoveAll(filepath.Join(d.cgroups.rootDir, "smallcloud", orgID, appName))
+
+	d.audit.Record(AuditEvent{
+		Type:      "delete",
+		OrgID:     orgID,
+		AppName:   appName,
+		ReleaseID: route.ActiveReleaseID,
+	})
+
+	return nil
 }
 
 func (d *Daemon) Status(orgID, appName string) (AppStatus, error) {
@@ -445,6 +542,7 @@ func (d *Daemon) LoadState(path string) error {
 	d.budget.RestoreStates(st.Budgets)
 	d.router.RestoreRoutes(st.Routes)
 	d.storage.RestoreGenerations(st.Generations)
+	d.audit.Restore(st.AuditEvents)
 
 	d.metaMu.Lock()
 	d.appMeta = make(map[string]AppMeta, len(st.AppMeta))
@@ -490,6 +588,7 @@ func (d *Daemon) SaveState(path string) error {
 		Generations: d.storage.SnapshotGenerations(),
 		Snapshots:   snapCopy,
 		AppMeta:     metaCopy,
+		AuditEvents: d.audit.Snapshot(),
 	}
 
 	data, err := json.MarshalIndent(st, "", "  ")

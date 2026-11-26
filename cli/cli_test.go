@@ -155,6 +155,151 @@ func TestCLIServeGracefulShutdownAndPersist(t *testing.T) {
 	}
 }
 
+func TestCLIDestroyAndEventsLocalAndRemote(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+
+	localStateDir := t.TempDir()
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, localStateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("local deploy failed: %v", err)
+	}
+
+	var localAllEventsOut bytes.Buffer
+	if err := Run([]string{"events"}, localStateDir, &localAllEventsOut); err != nil {
+		t.Fatalf("local events failed: %v", err)
+	}
+	var localAllEvents struct {
+		Events []daemon.AuditEvent `json:"events"`
+	}
+	if err := json.Unmarshal(localAllEventsOut.Bytes(), &localAllEvents); err != nil {
+		t.Fatalf("unmarshal local events: %v", err)
+	}
+	if len(localAllEvents.Events) == 0 {
+		t.Fatal("expected non-empty local events")
+	}
+
+	var localScopedEventsOut bytes.Buffer
+	if err := Run([]string{"events", templateDir}, localStateDir, &localScopedEventsOut); err != nil {
+		t.Fatalf("local scoped events failed: %v", err)
+	}
+	var localScopedEvents struct {
+		Events []daemon.AuditEvent `json:"events"`
+	}
+	if err := json.Unmarshal(localScopedEventsOut.Bytes(), &localScopedEvents); err != nil {
+		t.Fatalf("unmarshal local scoped events: %v", err)
+	}
+	if len(localScopedEvents.Events) == 0 {
+		t.Fatal("expected non-empty local scoped events")
+	}
+
+	var localDestroyOut bytes.Buffer
+	if err := Run([]string{"destroy", templateDir}, localStateDir, &localDestroyOut); err != nil {
+		t.Fatalf("local destroy failed: %v", err)
+	}
+	var localDeleted struct {
+		Deleted bool   `json:"deleted"`
+		OrgID   string `json:"org_id"`
+		AppName string `json:"app_name"`
+	}
+	if err := json.Unmarshal(localDestroyOut.Bytes(), &localDeleted); err != nil {
+		t.Fatalf("unmarshal local destroy: %v", err)
+	}
+	if !localDeleted.Deleted || localDeleted.OrgID != "org-indie-default" || localDeleted.AppName != "fastapi-starter" {
+		t.Fatalf("unexpected local destroy output: %+v", localDeleted)
+	}
+
+	var localListAfter bytes.Buffer
+	if err := Run([]string{"list"}, localStateDir, &localListAfter); err != nil {
+		t.Fatalf("local list after destroy failed: %v", err)
+	}
+	var listed struct {
+		Apps []daemon.AppStatus `json:"apps"`
+	}
+	if err := json.Unmarshal(localListAfter.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal local list: %v", err)
+	}
+	if len(listed.Apps) != 0 {
+		t.Fatalf("expected 0 apps after local destroy, got %+v", listed.Apps)
+	}
+
+	daemonDir := t.TempDir()
+	d := daemon.NewDaemon(filepath.Join(daemonDir, "cgroups"), filepath.Join(daemonDir, "replicas"))
+	const token = "cli-remote-destroy-secret"
+	srv := httptest.NewServer(d.HandlerWithAuth(token))
+	defer srv.Close()
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+	remoteStateDir := t.TempDir()
+
+	if err := Run([]string{"deploy", templateDir, "v2.0.0"}, remoteStateDir, &bytes.Buffer{}); err != nil {
+		t.Fatalf("remote deploy failed: %v", err)
+	}
+
+	var remoteEventsOut bytes.Buffer
+	if err := Run([]string{"events", templateDir}, remoteStateDir, &remoteEventsOut); err != nil {
+		t.Fatalf("remote events failed: %v", err)
+	}
+	var remoteEvents struct {
+		Events []daemon.AuditEvent `json:"events"`
+	}
+	if err := json.Unmarshal(remoteEventsOut.Bytes(), &remoteEvents); err != nil {
+		t.Fatalf("unmarshal remote events: %v", err)
+	}
+	if len(remoteEvents.Events) == 0 {
+		t.Fatal("expected non-empty remote events")
+	}
+
+	var remoteDestroyOut bytes.Buffer
+	if err := Run([]string{"destroy", templateDir}, remoteStateDir, &remoteDestroyOut); err != nil {
+		t.Fatalf("remote destroy failed: %v", err)
+	}
+	var remoteDeleted struct {
+		Deleted bool   `json:"deleted"`
+		OrgID   string `json:"org_id"`
+		AppName string `json:"app_name"`
+	}
+	if err := json.Unmarshal(remoteDestroyOut.Bytes(), &remoteDeleted); err != nil {
+		t.Fatalf("unmarshal remote destroy: %v", err)
+	}
+	if !remoteDeleted.Deleted || remoteDeleted.OrgID != "org-indie-default" || remoteDeleted.AppName != "fastapi-starter" {
+		t.Fatalf("unexpected remote destroy output: %+v", remoteDeleted)
+	}
+
+	var remoteListAfter bytes.Buffer
+	if err := Run([]string{"list"}, remoteStateDir, &remoteListAfter); err != nil {
+		t.Fatalf("remote list after destroy failed: %v", err)
+	}
+	var remoteListed struct {
+		Apps []daemon.AppStatus `json:"apps"`
+	}
+	if err := json.Unmarshal(remoteListAfter.Bytes(), &remoteListed); err != nil {
+		t.Fatalf("unmarshal remote list: %v", err)
+	}
+	if len(remoteListed.Apps) != 0 {
+		t.Fatalf("expected 0 apps after remote destroy, got %+v", remoteListed.Apps)
+	}
+}
+
+func TestCLIServeHealthProbeTimeoutValidation(t *testing.T) {
+	t.Setenv("SMALLCLOUD_HEALTH_PROBE_TIMEOUT", "0s")
+	if err := ServeWithContext(context.Background(), "127.0.0.1:0", t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for non-positive SMALLCLOUD_HEALTH_PROBE_TIMEOUT")
+	}
+
+	t.Setenv("SMALLCLOUD_HEALTH_PROBE_TIMEOUT", "not-a-duration")
+	if err := ServeWithContext(context.Background(), "127.0.0.1:0", t.TempDir(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for invalid SMALLCLOUD_HEALTH_PROBE_TIMEOUT")
+	}
+
+	t.Setenv("SMALLCLOUD_HEALTH_PROBE_TIMEOUT", "2s")
+	t.Setenv("SMALLCLOUD_RUNTIME", "docker")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := ServeWithContext(ctx, "127.0.0.1:0", t.TempDir(), &bytes.Buffer{}); err != nil {
+		t.Fatalf("ServeWithContext with valid probe timeout failed: %v", err)
+	}
+}
+
 func TestCLIRemoteDaemonEnvRouting(t *testing.T) {
 	daemonDir := t.TempDir()
 	d := daemon.NewDaemon(filepath.Join(daemonDir, "cgroups"), filepath.Join(daemonDir, "replicas"))

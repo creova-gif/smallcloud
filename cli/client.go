@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -212,4 +213,35 @@ func (c *DaemonClient) ListApps(ctx context.Context) ([]daemon.AppStatus, error)
 		return nil, err
 	}
 	return out.Apps, nil
+}
+
+func (c *DaemonClient) Events(ctx context.Context, orgID, appName string, limit int) ([]daemon.AuditEvent, error) {
+	q := url.Values{}
+	if orgID != "" {
+		q.Set("org_id", orgID)
+	}
+	if appName != "" {
+		q.Set("app", appName)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/v1/events"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var out struct {
+		Events []daemon.AuditEvent `json:"events"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Events, nil
+}
+
+func (c *DaemonClient) DeleteApp(ctx context.Context, orgID, appName string) error {
+	q := url.Values{}
+	q.Set("org_id", orgID)
+	q.Set("app", appName)
+	return c.doJSON(ctx, http.MethodDelete, "/v1/apps?"+q.Encode(), nil, nil)
 }

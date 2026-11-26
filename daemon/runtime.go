@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,15 +15,16 @@ import (
 )
 
 type ContainerSpec struct {
-	OrgID         string `json:"org_id"`
-	AppName       string `json:"app_name"`
-	ReleaseID     string `json:"release_id"`
-	AppDir        string `json:"app_dir"`
-	Port          int    `json:"port"`
-	CPUMillicores int    `json:"cpu_millicores"`
-	MemoryMB      int    `json:"memory_mb"`
-	SQLitePath    string `json:"sqlite_path"`
-	Healthcheck   string `json:"healthcheck"`
+	OrgID         string            `json:"org_id"`
+	AppName       string            `json:"app_name"`
+	ReleaseID     string            `json:"release_id"`
+	AppDir        string            `json:"app_dir"`
+	Port          int               `json:"port"`
+	CPUMillicores int               `json:"cpu_millicores"`
+	MemoryMB      int               `json:"memory_mb"`
+	SQLitePath    string            `json:"sqlite_path"`
+	Healthcheck   string            `json:"healthcheck"`
+	Env           map[string]string `json:"env,omitempty"`
 }
 
 type ContainerRuntime interface {
@@ -150,6 +152,17 @@ func (r DockerRuntime) Start(ctx context.Context, spec ContainerSpec) (string, e
 		sqliteDir := filepath.Dir(sqlitePath)
 		runArgs = append(runArgs, "-v", fmt.Sprintf("%s:%s", sqliteDir, sqliteDir))
 		runArgs = append(runArgs, "-e", "SMALLCLOUD_SQLITE_PATH="+sqlitePath)
+	}
+
+	if len(spec.Env) > 0 {
+		keys := make([]string, 0, len(spec.Env))
+		for k := range spec.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			runArgs = append(runArgs, "-e", k+"="+spec.Env[k])
+		}
 	}
 
 	runArgs = append(runArgs, tag)

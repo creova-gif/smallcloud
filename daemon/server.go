@@ -50,7 +50,9 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
 	mux.HandleFunc("GET /v1/apps", d.handleListApps)
+	mux.HandleFunc("DELETE /v1/apps", d.handleDeleteApp)
 	mux.HandleFunc("GET /v1/status", d.handleStatus)
+	mux.HandleFunc("GET /v1/events", d.handleEvents)
 	mux.HandleFunc("POST /v1/meter", d.handleMeter)
 	mux.HandleFunc("POST /v1/rollover", d.handleRollover)
 
@@ -163,6 +165,50 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleListApps(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
 		"apps": d.ListApps(),
+	})
+}
+
+func (d *Daemon) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
+	orgID := r.URL.Query().Get("org_id")
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = r.URL.Query().Get("app_name")
+	}
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := d.DeleteApp(orgID, appName); err != nil {
+		if errors.Is(err, ErrNoRouteFound) {
+			writeHTTPError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"deleted":  true,
+		"org_id":   orgID,
+		"app_name": appName,
+	})
+}
+
+func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	orgID := q.Get("org_id")
+	appName := q.Get("app")
+	limit := 0
+	if rawLimit := q.Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			writeHTTPError(w, http.StatusBadRequest, "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+	writeHTTPJSON(w, http.StatusOK, map[string]any{
+		"events": d.Audit().List(orgID, appName, limit),
 	})
 }
 

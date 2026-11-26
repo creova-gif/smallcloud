@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -23,10 +25,11 @@ func IsValidSlug(s string) bool {
 }
 
 type Config struct {
-	App       AppConfig       `json:"app"`
-	Resources ResourcesConfig `json:"resources"`
-	Budget    BudgetConfig    `json:"budget"`
-	Storage   StorageConfig   `json:"storage"`
+	App       AppConfig         `json:"app"`
+	Resources ResourcesConfig   `json:"resources"`
+	Budget    BudgetConfig      `json:"budget"`
+	Storage   StorageConfig     `json:"storage"`
+	Env       map[string]string `toml:"env" json:"env,omitempty"`
 }
 
 type AppConfig struct {
@@ -132,7 +135,11 @@ func Parse(r io.Reader) (*Config, error) {
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("line %d: invalid key=value syntax: %q", lineNum, line)
 		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		rawKey := strings.TrimSpace(parts[0])
+		key := strings.ToLower(rawKey)
+		if section == "env" {
+			key = rawKey
+		}
 		rawVal := strings.TrimSpace(parts[1])
 
 		if err := assignField(cfg, section, key, rawVal); err != nil {
@@ -152,6 +159,18 @@ func Parse(r io.Reader) (*Config, error) {
 }
 
 func assignField(cfg *Config, section, key, rawVal string) error {
+	if section == "env" {
+		val, err := parseString(rawVal)
+		if err != nil {
+			return err
+		}
+		if cfg.Env == nil {
+			cfg.Env = make(map[string]string)
+		}
+		cfg.Env[key] = val
+		return nil
+	}
+
 	fullKey := key
 	if section != "" {
 		fullKey = section + "." + key
@@ -304,6 +323,24 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.SyncMs < 50 || c.Storage.SyncMs > 60000 {
 		return fmt.Errorf("storage.sync_ms must be between 50 and 60000, got %d", c.Storage.SyncMs)
+	}
+	if len(c.Env) > 0 {
+		keys := make([]string, 0, len(c.Env))
+		for k := range c.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if k == "" {
+				return errors.New("env key cannot be empty")
+			}
+			if strings.ContainsRune(k, '=') || strings.IndexFunc(k, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("env key %q contains invalid characters", k)
+			}
+			if strings.ContainsRune(c.Env[k], '\x00') {
+				return fmt.Errorf("env value for %q contains NUL byte", k)
+			}
+		}
 	}
 	return nil
 }

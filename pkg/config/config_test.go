@@ -196,3 +196,146 @@ max_monthly_usd = 5.00
 		t.Fatalf("unexpected loaded config: %+v", cfg)
 	}
 }
+
+func TestParseValidEnv(t *testing.T) {
+	raw := `
+[app]
+name = "env-app"
+org_id = "acme-org"
+domain = "env.smallcloud.dev"
+[budget]
+max_monthly_usd = 5.00
+[env]
+API_KEY = "secret-123"
+LOG_LEVEL = "debug"
+EMPTY_VAL = ""
+`
+	cfg, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("expected valid config with [env], got error: %v", err)
+	}
+	if len(cfg.Env) != 3 {
+		t.Fatalf("expected 3 env entries, got %d", len(cfg.Env))
+	}
+	if cfg.Env["API_KEY"] != "secret-123" {
+		t.Errorf("expected API_KEY=secret-123, got %q", cfg.Env["API_KEY"])
+	}
+	if cfg.Env["LOG_LEVEL"] != "debug" {
+		t.Errorf("expected LOG_LEVEL=debug, got %q", cfg.Env["LOG_LEVEL"])
+	}
+	if v, ok := cfg.Env["EMPTY_VAL"]; !ok || v != "" {
+		t.Errorf("expected EMPTY_VAL='', got %q (ok=%v)", v, ok)
+	}
+}
+
+func TestEnvValidationRejectsInvalidEntries(t *testing.T) {
+	baseConfig := func(env map[string]string) *Config {
+		return &Config{
+			App: AppConfig{
+				Name:        "env-app",
+				OrgID:       "acme-org",
+				Domain:      "env.smallcloud.dev",
+				Port:        8000,
+				Healthcheck: "/healthz",
+				Runtime:     "dockerfile",
+			},
+			Resources: ResourcesConfig{
+				CPUMillicores: 500,
+				MemoryMB:      256,
+			},
+			Budget: BudgetConfig{
+				MaxMonthlyUSD: 5.0,
+				AlertAtPct:    80.0,
+				HardStop:      true,
+			},
+			Storage: StorageConfig{
+				SQLitePath: "/data/app.db",
+				SyncMs:     1000,
+			},
+			Env: env,
+		}
+	}
+
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "empty key",
+			env:     map[string]string{"": "val"},
+			wantErr: "env key cannot be empty",
+		},
+		{
+			name:    "key with equals",
+			env:     map[string]string{"BAD=KEY": "val"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "key with space",
+			env:     map[string]string{"BAD KEY": "val"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "key with tab",
+			env:     map[string]string{"BAD\tKEY": "val"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "key with newline",
+			env:     map[string]string{"BAD\nKEY": "val"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "value with NUL byte",
+			env:     map[string]string{"GOOD_KEY": "bad\x00val"},
+			wantErr: "NUL byte",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := baseConfig(tc.env).Validate()
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", tc.wantErr, err.Error())
+			}
+		})
+	}
+
+	parseCases := []struct {
+		name    string
+		toml    string
+		wantErr string
+	}{
+		{
+			name:    "parse empty env key",
+			toml:    "[app]\nname = \"env-app\"\norg_id = \"acme-org\"\ndomain = \"env.smallcloud.dev\"\n[budget]\nmax_monthly_usd = 5.00\n[env]\n= \"val\"\n",
+			wantErr: "env key cannot be empty",
+		},
+		{
+			name:    "parse whitespace env key",
+			toml:    "[app]\nname = \"env-app\"\norg_id = \"acme-org\"\ndomain = \"env.smallcloud.dev\"\n[budget]\nmax_monthly_usd = 5.00\n[env]\nBAD KEY = \"val\"\n",
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "parse NUL byte in env value",
+			toml:    "[app]\nname = \"env-app\"\norg_id = \"acme-org\"\ndomain = \"env.smallcloud.dev\"\n[budget]\nmax_monthly_usd = 5.00\n[env]\nKEY = \"val\x00\"\n",
+			wantErr: "NUL byte",
+		},
+	}
+
+	for _, tc := range parseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(tc.toml))
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", tc.wantErr, err.Error())
+			}
+		})
+	}
+}

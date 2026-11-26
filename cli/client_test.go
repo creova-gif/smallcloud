@@ -138,3 +138,50 @@ func TestDaemonClientLifecycleAndAuth(t *testing.T) {
 		t.Fatalf("expected 401 unauthorized error without token, got %v", err)
 	}
 }
+
+func TestDaemonClientEventsAndDeleteApp(t *testing.T) {
+	tmp := t.TempDir()
+	d := daemon.NewDaemon(filepath.Join(tmp, "cgroups"), filepath.Join(tmp, "replicas"))
+	srv := httptest.NewServer(d.HandlerWithAuth("secret-tok"))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	ctx := context.Background()
+	cfg := testClientConfig()
+
+	if _, err := client.Deploy(ctx, cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	scopedEvents, err := client.Events(ctx, cfg.App.OrgID, cfg.App.Name, 10)
+	if err != nil {
+		t.Fatalf("scoped events failed: %v", err)
+	}
+	if len(scopedEvents) == 0 {
+		t.Fatal("expected non-empty scoped events after deploy")
+	}
+
+	allEvents, err := client.Events(ctx, "", "", 0)
+	if err != nil {
+		t.Fatalf("all events failed: %v", err)
+	}
+	if len(allEvents) == 0 {
+		t.Fatal("expected non-empty all events after deploy")
+	}
+
+	if err := client.DeleteApp(ctx, cfg.App.OrgID, cfg.App.Name); err != nil {
+		t.Fatalf("delete app failed: %v", err)
+	}
+
+	apps, err := client.ListApps(ctx)
+	if err != nil {
+		t.Fatalf("list apps after delete failed: %v", err)
+	}
+	if len(apps) != 0 {
+		t.Fatalf("expected 0 apps after delete, got %+v", apps)
+	}
+
+	if _, err := client.Status(ctx, cfg.App.OrgID, cfg.App.Name); err == nil {
+		t.Fatal("expected status after delete to fail")
+	}
+}

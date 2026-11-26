@@ -296,6 +296,18 @@ func (r *CaddyRouter) GetRoute(orgID, appName string) (RouteEntry, bool) {
 	return cloneRouteEntry(*curr), true
 }
 
+func (r *CaddyRouter) DeleteRoute(orgID, appName string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := tenantKey(orgID, appName)
+	if _, exists := r.routes[key]; !exists {
+		return false
+	}
+	delete(r.routes, key)
+	return true
+}
+
 func (r *CaddyRouter) SnapshotRoutes() map[string]*RouteEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
