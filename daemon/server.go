@@ -73,6 +73,7 @@ func (d *Daemon) Handler() http.Handler {
 }
 
 func (d *Daemon) HandlerWithAuth(token string) http.Handler {
+	startedAt := time.Now().UTC()
 	metrics := &HTTPMetrics{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", d.handleUI)
@@ -80,7 +81,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("GET /healthz", d.handleHealthz)
 	mux.HandleFunc("GET /readyz", d.handleReadyz)
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		d.writeMetrics(w, metrics)
+		d.writeMetrics(w, metrics, startedAt)
 	})
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
@@ -351,7 +352,7 @@ func escapePromLabel(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
 }
 
-func (d *Daemon) writeMetrics(w http.ResponseWriter, metrics *HTTPMetrics) {
+func (d *Daemon) writeMetrics(w http.ResponseWriter, metrics *HTTPMetrics, startedAt time.Time) {
 	apps := d.ListApps()
 	nodes := d.WorkerPool().ListNodes()
 	healthyNodes := 0
@@ -363,9 +364,19 @@ func (d *Daemon) writeMetrics(w http.ResponseWriter, metrics *HTTPMetrics) {
 
 	var requestsTotal uint64
 	var errorsTotal uint64
+	var budgetExceededTotal uint64
 	if metrics != nil {
 		requestsTotal = metrics.RequestsTotal.Load()
 		errorsTotal = metrics.ErrorsTotal.Load()
+		budgetExceededTotal = metrics.BudgetExceededTotal.Load()
+	}
+
+	uptimeSeconds := 0.0
+	if !startedAt.IsZero() {
+		uptimeSeconds = time.Since(startedAt).Seconds()
+		if uptimeSeconds < 0 {
+			uptimeSeconds = 0
+		}
 	}
 
 	var buf bytes.Buffer
@@ -403,6 +414,12 @@ func (d *Daemon) writeMetrics(w http.ResponseWriter, metrics *HTTPMetrics) {
 
 	fmt.Fprintf(&buf, "# TYPE smallcloud_http_errors_total counter\n")
 	fmt.Fprintf(&buf, "smallcloud_http_errors_total %d\n", errorsTotal)
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_budget_exceeded_total counter\n")
+	fmt.Fprintf(&buf, "smallcloud_budget_exceeded_total %d\n", budgetExceededTotal)
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_daemon_uptime_seconds gauge\n")
+	fmt.Fprintf(&buf, "smallcloud_daemon_uptime_seconds %s\n", strconv.FormatFloat(uptimeSeconds, 'f', -1, 64))
 
 	fmt.Fprintf(&buf, "# TYPE smallcloud_worker_nodes_total gauge\n")
 	fmt.Fprintf(&buf, "smallcloud_worker_nodes_total %d\n", len(nodes))

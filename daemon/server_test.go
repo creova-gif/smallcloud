@@ -460,11 +460,34 @@ func TestMetricsEndpoint(t *testing.T) {
 		"# TYPE smallcloud_app_halted gauge",
 		`smallcloud_app_halted{org_id="acme",app="api"} 1`,
 		`smallcloud_app_halted{org_id="acme",app="web"} 0`,
+		"# TYPE smallcloud_budget_exceeded_total counter",
+		"smallcloud_budget_exceeded_total 0",
+		"# TYPE smallcloud_daemon_uptime_seconds gauge",
+		"smallcloud_daemon_uptime_seconds ",
 	}
 	for _, want := range expectedLines {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output missing %q\ngot:\n%s", want, body)
 		}
+	}
+
+	meterReq := httptest.NewRequest(http.MethodPost, "/v1/meter", strings.NewReader(`{"org_id":"acme","app_name":"web","delta_usd":30}`))
+	meterReq.Header.Set("Authorization", "Bearer secret")
+	meterReq.Header.Set("Content-Type", "application/json")
+	meterRec := httptest.NewRecorder()
+	h.ServeHTTP(meterRec, meterReq)
+	if meterRec.Code != http.StatusPaymentRequired {
+		t.Fatalf("expected status 402 on budget exceeded, got %d: %s", meterRec.Code, meterRec.Body.String())
+	}
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	afterRec := httptest.NewRecorder()
+	h.ServeHTTP(afterRec, afterReq)
+	if afterRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 after 402, got %d: %s", afterRec.Code, afterRec.Body.String())
+	}
+	if !strings.Contains(afterRec.Body.String(), "smallcloud_budget_exceeded_total 1\n") {
+		t.Fatalf("expected smallcloud_budget_exceeded_total 1 after 402, got:\n%s", afterRec.Body.String())
 	}
 
 	if got := escapePromLabel("a\\b\"c\nd"); got != `a\\b\"c\nd` {

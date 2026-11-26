@@ -1,7 +1,7 @@
 # SmallCloud
 
 [![CI](https://github.com/creova-gif/smallcloud/actions/workflows/ci.yml/badge.svg)](https://github.com/creova-gif/smallcloud/actions/workflows/ci.yml)
-[![Go 1.23](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 SmallCloud deploys single-node and edge-routed web applications from a repository to HTTPS in under 30 seconds. It enforces Linux cgroups v2 limits, replicates SQLite with Litestream, swaps Blue/Green and canary routes through Caddy, and stops traffic when an application reaches `max_monthly_usd`.
@@ -32,7 +32,7 @@ flowchart LR
 
 Prebuilt release binaries for `linux` and `darwin` (`amd64` and `arm64`) with SHA-256 `checksums.txt` are published on GitHub Releases for `v*` tags.
 
-Install with Go 1.23+:
+Install with Go 1.25+:
 
 ```bash
 go install github.com/creova-gif/smallcloud/cli/cmd/smallcloud@latest

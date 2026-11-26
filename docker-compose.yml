@@ -1,6 +1,6 @@
 services:
   smallcloud:
-    image: golang:1.23-alpine
+    image: golang:1.26-alpine
     working_dir: /app
     command: ["go", "run", "./cli/cmd/smallcloud", "serve", "--addr", "0.0.0.0:7420"]
     env_file:

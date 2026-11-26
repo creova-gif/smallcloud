@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security, Concurrency & Operator UI
+- **Go 1.25 Toolchain Baseline**: Upgraded the Go toolchain baseline to `1.25` across `go.mod`, CI/Release workflows, Compose, and `templates/go-sqlite/Dockerfile` to remediate Go 1.23 standard-library CVEs (`crypto/tls`, `crypto/x509`).
+- **Template Container Hardening**: Hardened `templates/fastapi-sqlite/Dockerfile`, `templates/node-sqlite/Dockerfile`, and `templates/go-sqlite/Dockerfile` with non-root `USER` execution and `HEALTHCHECK` probes.
+- **Daemon & Budget Prometheus Metrics**: Added `smallcloud_daemon_uptime_seconds` and `smallcloud_budget_exceeded_total` Prometheus metrics in `daemon/server.go`.
 - **HTTP Load Shedding (`MaxInFlightMiddleware`)**: Added `MaxInFlightMiddleware` (`SMALLCLOUD_MAX_INFLIGHT`, default `256`) to cap concurrent in-flight HTTP requests and shed excess load with HTTP `503` and `Retry-After: 5`.
 - **Container Fork-Bomb Protection**: Added `--pids-limit 256` to `DockerRuntime` container launches to mitigate PID exhaustion / fork bombs.
 - **Dependabot Configuration Cleanup**: Cleaned up `.github/dependabot.yml` to track `gomod` and `github-actions` updates.
