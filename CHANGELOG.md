@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-11-26
+
 ### Hardening, Observability & Disaster Recovery
 - **HTTP Security Middleware**: Added token-bucket `RateLimitMiddleware`, `X-Request-ID` propagation, and HTTP security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cache-Control`).
 - **Readiness Endpoint**: Added `GET /readyz` to verify daemon readiness separately from `/healthz`.

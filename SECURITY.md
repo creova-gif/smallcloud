@@ -4,6 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
+| `v0.2.x` | Yes |
 | `v0.1.x` | Yes |
 | `< v0.1.0` / unreleased snapshots | No |
 

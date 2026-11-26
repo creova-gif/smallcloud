@@ -23,7 +23,7 @@ import (
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
 
-var Version = "v0.1.0"
+var Version = "v0.2.0"
 
 type BundleManifest struct {
 	Config        *config.Config `json:"config"`
