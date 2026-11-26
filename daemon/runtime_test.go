@@ -3,9 +3,15 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type recordedCommand struct {
@@ -271,4 +277,106 @@ func TestDockerRuntimeDefaultBinaryAndErrors(t *testing.T) {
 			t.Fatal("CommandRunner should not be called when validation fails")
 		}
 	})
+}
+
+func TestDockerRuntimeReadinessProbeSuccess(t *testing.T) {
+	var attempts atomic.Int32
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if attempts.Add(1) < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("parse server addr: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	var calls []recordedCommand
+	rt := DockerRuntime{
+		HealthProbeTimeout:  time.Second,
+		HealthProbeInterval: 10 * time.Millisecond,
+		CommandRunner: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, recordedCommand{name: name, args: append([]string(nil), args...)})
+			return []byte("ok"), nil
+		},
+	}
+
+	upstream, err := rt.Start(context.Background(), ContainerSpec{
+		OrgID:         "acme",
+		AppName:       "billing",
+		ReleaseID:     "rel-ready",
+		AppDir:        "/tmp/app",
+		Port:          port,
+		CPUMillicores: 500,
+		MemoryMB:      256,
+		Healthcheck:   "/readyz",
+	})
+	if err != nil {
+		t.Fatalf("expected Start to succeed after readiness probe, got %v", err)
+	}
+	if upstream != "127.0.0.1:"+portStr {
+		t.Fatalf("expected upstream 127.0.0.1:%s, got %q", portStr, upstream)
+	}
+	if gotPath != "/readyz" {
+		t.Fatalf("expected probe path /readyz, got %q", gotPath)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 commands (build + run), got %d", len(calls))
+	}
+}
+
+func TestDockerRuntimeReadinessProbeFailureCleansUpContainer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("parse server addr: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	var calls []recordedCommand
+	rt := DockerRuntime{
+		HealthProbeTimeout:  50 * time.Millisecond,
+		HealthProbeInterval: 10 * time.Millisecond,
+		CommandRunner: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, recordedCommand{name: name, args: append([]string(nil), args...)})
+			return []byte("ok"), nil
+		},
+	}
+
+	_, err = rt.Start(context.Background(), ContainerSpec{
+		OrgID:         "acme",
+		AppName:       "billing",
+		ReleaseID:     "rel-fail",
+		AppDir:        "/tmp/app",
+		Port:          port,
+		CPUMillicores: 500,
+		MemoryMB:      256,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 commands (build + run + rm), got %d", len(calls))
+	}
+	expectedStop := []string{"rm", "-f", "sc-acme-billing-rel-fail"}
+	if !slices.Equal(calls[2].args, expectedStop) {
+		t.Fatalf("expected cleanup command %v, got %v", expectedStop, calls[2].args)
+	}
 }

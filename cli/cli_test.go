@@ -331,3 +331,21 @@ func TestCLILocalMeterRolloverAndList(t *testing.T) {
 		t.Fatalf("expected current_usd reset to 0 after rollover, got %v", st.Budget.CurrentUSD)
 	}
 }
+
+func TestCLIServeBackgroundRolloverAndShutdown(t *testing.T) {
+	t.Setenv("SMALLCLOUD_ROLLOVER_INTERVAL", "15ms")
+	stateDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	var out bytes.Buffer
+	if err := ServeWithContext(ctx, "127.0.0.1:0", stateDir, &out); err != nil {
+		t.Fatalf("ServeWithContext failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "listening") {
+		t.Fatalf("expected listening JSON output, got %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "state.json")); err != nil {
+		t.Fatalf("expected state.json persisted on shutdown: %v", err)
+	}
+}

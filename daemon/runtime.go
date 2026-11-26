@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/creova-gif/smallcloud/pkg/core"
 )
 
 type ContainerSpec struct {
@@ -19,6 +22,7 @@ type ContainerSpec struct {
 	CPUMillicores int    `json:"cpu_millicores"`
 	MemoryMB      int    `json:"memory_mb"`
 	SQLitePath    string `json:"sqlite_path"`
+	Healthcheck   string `json:"healthcheck"`
 }
 
 type ContainerRuntime interface {
@@ -56,8 +60,10 @@ func (NoopRuntime) Stop(ctx context.Context, orgID, appName, releaseID string) e
 }
 
 type DockerRuntime struct {
-	Binary        string
-	CommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+	Binary              string
+	CommandRunner       func(ctx context.Context, name string, args ...string) ([]byte, error)
+	HealthProbeTimeout  time.Duration
+	HealthProbeInterval time.Duration
 }
 
 func (r DockerRuntime) binaryName() string {
@@ -153,7 +159,19 @@ func (r DockerRuntime) Start(ctx context.Context, spec ContainerSpec) (string, e
 		return "", fmt.Errorf("docker run %q: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
 
-	return fmt.Sprintf("127.0.0.1:%d", spec.Port), nil
+	upstream := fmt.Sprintf("127.0.0.1:%d", spec.Port)
+	if r.HealthProbeTimeout > 0 {
+		healthPath := strings.TrimSpace(spec.Healthcheck)
+		if healthPath == "" {
+			healthPath = "/healthz"
+		}
+		if err := core.ProbeHTTPReady(ctx, "http://"+upstream, healthPath, r.HealthProbeInterval, r.HealthProbeTimeout); err != nil {
+			_ = r.Stop(context.WithoutCancel(ctx), spec.OrgID, spec.AppName, spec.ReleaseID)
+			return "", err
+		}
+	}
+
+	return upstream, nil
 }
 
 func (r DockerRuntime) Stop(ctx context.Context, orgID, appName, releaseID string) error {

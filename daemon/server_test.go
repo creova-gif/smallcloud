@@ -3,9 +3,11 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,5 +336,105 @@ func TestListAppsEndpoint(t *testing.T) {
 		if got.Budget.MaxMonthlyUSD != 10.0 {
 			t.Fatalf("apps[%d]: unexpected budget %+v", i, got.Budget)
 		}
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	h := d.HandlerWithAuth("secret")
+
+	emptyReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	emptyRec := httptest.NewRecorder()
+	h.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", emptyRec.Code, emptyRec.Body.String())
+	}
+	if ct := emptyRec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain; version=0.0.4") {
+		t.Fatalf("unexpected Content-Type: %q", ct)
+	}
+	if !strings.Contains(emptyRec.Body.String(), "smallcloud_apps_total 0\n") {
+		t.Fatalf("expected smallcloud_apps_total 0, got:\n%s", emptyRec.Body.String())
+	}
+
+	specs := []struct {
+		orgID string
+		app   string
+		limit float64
+		spend float64
+		halt  bool
+	}{
+		{orgID: "acme", app: "api", limit: 10.0, spend: 15.0, halt: true},
+		{orgID: "acme", app: "web", limit: 25.0, spend: 5.0, halt: false},
+	}
+
+	for _, s := range specs {
+		cfg := &config.Config{
+			App: config.AppConfig{
+				Name:        s.app,
+				OrgID:       s.orgID,
+				Domain:      s.app + ".smallcloud.dev",
+				Port:        8000,
+				Healthcheck: "/healthz",
+				Runtime:     "dockerfile",
+			},
+			Resources: config.ResourcesConfig{
+				CPUMillicores: 250,
+				MemoryMB:      128,
+			},
+			Budget: config.BudgetConfig{
+				MaxMonthlyUSD: s.limit,
+				AlertAtPct:    80.0,
+				HardStop:      true,
+			},
+			Storage: config.StorageConfig{
+				SQLitePath: "/data/" + s.app + ".db",
+				SyncMs:     1000,
+			},
+		}
+		if _, err := d.Deploy(cfg, "v1.0.0"); err != nil {
+			t.Fatalf("deploy %s/%s failed: %v", s.orgID, s.app, err)
+		}
+		_, err := d.RecordSpend(s.orgID, s.app, s.spend)
+		if s.halt {
+			if !errors.Is(err, ErrBudgetExceeded) {
+				t.Fatalf("expected ErrBudgetExceeded for %s/%s, got %v", s.orgID, s.app, err)
+			}
+		} else if err != nil {
+			t.Fatalf("record spend for %s/%s failed: %v", s.orgID, s.app, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain; version=0.0.4") {
+		t.Fatalf("unexpected Content-Type: %q", ct)
+	}
+
+	body := rec.Body.String()
+	expectedLines := []string{
+		"# TYPE smallcloud_apps_total gauge",
+		"smallcloud_apps_total 2",
+		"# TYPE smallcloud_app_budget_limit_usd gauge",
+		`smallcloud_app_budget_limit_usd{org_id="acme",app="api"} 10`,
+		`smallcloud_app_budget_limit_usd{org_id="acme",app="web"} 25`,
+		"# TYPE smallcloud_app_budget_spend_usd gauge",
+		`smallcloud_app_budget_spend_usd{org_id="acme",app="api"} 15`,
+		`smallcloud_app_budget_spend_usd{org_id="acme",app="web"} 5`,
+		"# TYPE smallcloud_app_halted gauge",
+		`smallcloud_app_halted{org_id="acme",app="api"} 1`,
+		`smallcloud_app_halted{org_id="acme",app="web"} 0`,
+	}
+	for _, want := range expectedLines {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output missing %q\ngot:\n%s", want, body)
+		}
+	}
+
+	if got := escapePromLabel("a\\b\"c\nd"); got != `a\\b\"c\nd` {
+		t.Fatalf("unexpected escaped label: %q", got)
 	}
 }

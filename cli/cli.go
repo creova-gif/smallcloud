@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -350,6 +351,17 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 	if addr == "" {
 		addr = "127.0.0.1:7420"
 	}
+	rolloverInterval := time.Hour
+	if raw := strings.TrimSpace(os.Getenv("SMALLCLOUD_ROLLOVER_INTERVAL")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("invalid SMALLCLOUD_ROLLOVER_INTERVAL %q: %w", raw, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("SMALLCLOUD_ROLLOVER_INTERVAL must be > 0, got %s", parsed)
+		}
+		rolloverInterval = parsed
+	}
 	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
 	if caddyURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_CADDY_ADMIN_URL")); caddyURL != "" {
 		d.Router().SetApplier(daemon.HTTPAdminApplier{AdminURL: caddyURL})
@@ -373,6 +385,27 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	rollCtx, rollCancel := context.WithCancel(ctx)
+	defer rollCancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(rolloverInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-rollCtx.Done():
+				return
+			case <-ticker.C:
+				if rolled := d.RolloverAll(time.Now().UTC()); rolled > 0 {
+					_ = d.SaveState(statePath)
+				}
+			}
+		}
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -384,14 +417,18 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 	select {
 	case <-ctx.Done():
+		rollCancel()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
+		wg.Wait()
 		if err := d.SaveState(statePath); err != nil {
 			return err
 		}
 		return <-errCh
 	case err := <-errCh:
+		rollCancel()
+		wg.Wait()
 		if saveErr := d.SaveState(statePath); saveErr != nil && err == nil {
 			return saveErr
 		}

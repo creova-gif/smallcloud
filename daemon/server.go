@@ -5,9 +5,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +46,7 @@ func (d *Daemon) Handler() http.Handler {
 func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", d.handleHealthz)
+	mux.HandleFunc("GET /metrics", d.handleMetrics)
 	mux.HandleFunc("POST /v1/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
 	mux.HandleFunc("GET /v1/apps", d.handleListApps)
@@ -200,6 +203,47 @@ func (d *Daemon) handleMeter(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func escapePromLabel(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
+}
+
+func (d *Daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	apps := d.ListApps()
+	var buf bytes.Buffer
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_apps_total gauge\n")
+	fmt.Fprintf(&buf, "smallcloud_apps_total %d\n", len(apps))
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_app_budget_limit_usd gauge\n")
+	for _, app := range apps {
+		org := escapePromLabel(app.OrgID)
+		name := escapePromLabel(app.AppName)
+		fmt.Fprintf(&buf, "smallcloud_app_budget_limit_usd{org_id=\"%s\",app=\"%s\"} %s\n", org, name, strconv.FormatFloat(app.Budget.MaxMonthlyUSD, 'f', -1, 64))
+	}
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_app_budget_spend_usd gauge\n")
+	for _, app := range apps {
+		org := escapePromLabel(app.OrgID)
+		name := escapePromLabel(app.AppName)
+		fmt.Fprintf(&buf, "smallcloud_app_budget_spend_usd{org_id=\"%s\",app=\"%s\"} %s\n", org, name, strconv.FormatFloat(app.Budget.CurrentUSD, 'f', -1, 64))
+	}
+
+	fmt.Fprintf(&buf, "# TYPE smallcloud_app_halted gauge\n")
+	for _, app := range apps {
+		org := escapePromLabel(app.OrgID)
+		name := escapePromLabel(app.AppName)
+		halted := 0
+		if app.Budget.Halted {
+			halted = 1
+		}
+		fmt.Fprintf(&buf, "smallcloud_app_halted{org_id=\"%s\",app=\"%s\"} %d\n", org, name, halted)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (d *Daemon) handleRollover(w http.ResponseWriter, r *http.Request) {
