@@ -19,7 +19,7 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -race ./...
+        run: go test -race -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -n 1 && rm -f coverage.out
       - name: Test FastAPI template
         run: python3 -m unittest -v templates/fastapi-sqlite/test_app.py
       - name: Test Node template
@@ -27,4 +27,4 @@ jobs:
       - name: Eval
         run: go run ./cli/cmd/smallcloud eval
       - name: Build
-        run: go build -o /tmp/smallcloud ./cli/cmd/smallcloud
+        run: go build -ldflags "-X github.com/creova-gif/smallcloud/cli.Version=${GITHUB_REF_NAME:-dev}" -o /tmp/smallcloud ./cli/cmd/smallcloud

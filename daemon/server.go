@@ -91,6 +91,7 @@ func (d *Daemon) HandlerWithAuth(token string) http.Handler {
 	mux.HandleFunc("POST /v1/nodes/register", d.handleNodeRegister)
 	mux.HandleFunc("POST /v1/nodes/heartbeat", d.handleNodeHeartbeat)
 	mux.HandleFunc("GET /v1/nodes", d.handleListNodes)
+	mux.HandleFunc("GET /v1/backup", d.handleBackup)
 	mux.HandleFunc("POST /webhooks/github", d.handleGitHubWebhook)
 
 	var handler http.Handler = mux
@@ -614,6 +615,45 @@ func (d *Daemon) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeHTTPJSON(w, http.StatusOK, ev)
+}
+
+func (d *Daemon) handleBackup(w http.ResponseWriter, r *http.Request) {
+	orgID := r.URL.Query().Get("org_id")
+	appName := r.URL.Query().Get("app")
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	tmpFile, err := os.CreateTemp(os.TempDir(), "smallcloud-backup-*.tar.gz")
+	if err != nil {
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	if _, err := ExportBackupBundle(d, orgID, appName, tmpPath); err != nil {
+		if errors.Is(err, ErrNoRouteFound) {
+			writeHTTPError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		writeHTTPError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer f.Close()
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s-backup.tar.gz"`, orgID, appName))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f)
 }
 
 func isValidationError(err error) bool {

@@ -13,7 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Disaster Recovery Backup Bundles**: Added `ExportBackupBundle`, `VerifyBackupBundle`, and `RestoreBackupBundle` in `daemon/backup.go` for portable `.tar.gz` app and SQLite replica archives with SHA-256 verification.
 - **Unsafe Linker `[env]` Blocking**: Blocked unsafe dynamic linker environment variables (e.g. `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`) in `smallcloud.toml` `[env]` validation.
 - **Backup & Snapshot CLI Commands**: Added `smallcloud verify-snapshot`, `smallcloud backup`, and `smallcloud restore-bundle` CLI subcommands.
-- **Structured Access Logging**: Added structured `log/slog` HTTP access logging in the control-plane daemon.
+- **Structured Access Logging**: Added structured `log/slog` HTTP access logging in the control-plane daemon, controlled via `SMALLCLOUD_ACCESS_LOG` (default `true`).
+- **Backup Download Endpoint & Client**: Added `GET /v1/backup` on the control-plane daemon and `DaemonClient.DownloadBackup` in the CLI client.
+- **Archive Extraction Hardening**: Hardened `.tar.gz` backup extraction against tar-bomb path traversal, oversized entries, and unsafe symlinks/hardlinks.
+- **CLI Version & Build Metadata**: Added `smallcloud version` subcommand with `cli.Version` ldflags injection in CI builds.
+- **CI Coverage Reporting**: Updated GitHub Actions CI to collect Go test coverage with `go test -race -coverprofile=coverage.out ./...` and report total coverage.
 
 ### Wave 7 — Distributed Edge, Zero-Trust Mesh & Developer Platform
 - **GitHub Webhook Git-Push Deployments**: HMAC-SHA256 webhook signature verification (`VerifyGitHubSignature`) and push event parsing (`ParseGitHubPushEvent`) in `daemon/gitops.go`.

@@ -1411,3 +1411,69 @@ func TestRateLimitMiddlewareOnServer(t *testing.T) {
 		}
 	}
 }
+
+func TestBackupEndpoint(t *testing.T) {
+	d := newTestServerDaemon(t)
+	cfg := sampleConfig()
+	if _, err := d.Deploy(cfg, "v1.0.0"); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	h := d.HandlerWithAuth("")
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/backup?org_id=%s&app=%s", cfg.App.OrgID, cfg.App.Name), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/gzip" {
+		t.Fatalf("Content-Type = %q, want application/gzip", got)
+	}
+	wantDisp := fmt.Sprintf(`attachment; filename="%s-%s-backup.tar.gz"`, cfg.App.OrgID, cfg.App.Name)
+	if got := rec.Header().Get("Content-Disposition"); got != wantDisp {
+		t.Fatalf("Content-Disposition = %q, want %q", got, wantDisp)
+	}
+
+	bundlePath := filepath.Join(t.TempDir(), "downloaded.tar.gz")
+	if err := os.WriteFile(bundlePath, rec.Body.Bytes(), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	manifest, err := VerifyBackupBundle(bundlePath)
+	if err != nil {
+		t.Fatalf("VerifyBackupBundle: %v", err)
+	}
+	if manifest.OrgID != cfg.App.OrgID || manifest.AppName != cfg.App.Name {
+		t.Fatalf("manifest tenant = %s/%s, want %s/%s", manifest.OrgID, manifest.AppName, cfg.App.OrgID, cfg.App.Name)
+	}
+
+	badReq := httptest.NewRequest(http.MethodGet, "/v1/backup?org_id=../bad&app=web", nil)
+	badRec := httptest.NewRecorder()
+	h.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid slugs, got %d: %s", badRec.Code, badRec.Body.String())
+	}
+
+	missingReq := httptest.NewRequest(http.MethodGet, "/v1/backup?org_id=acme&app=missing", nil)
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown app, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	authH := d.HandlerWithAuth("secret-token")
+	unauthReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/backup?org_id=%s&app=%s", cfg.App.OrgID, cfg.App.Name), nil)
+	unauthRec := httptest.NewRecorder()
+	authH.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without bearer token, got %d: %s", unauthRec.Code, unauthRec.Body.String())
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/backup?org_id=%s&app=%s", cfg.App.OrgID, cfg.App.Name), nil)
+	authReq.Header.Set("Authorization", "Bearer secret-token")
+	authRec := httptest.NewRecorder()
+	authH.ServeHTTP(authRec, authReq)
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with bearer token, got %d: %s", authRec.Code, authRec.Body.String())
+	}
+}

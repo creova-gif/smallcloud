@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -351,5 +352,64 @@ func TestDaemonClientNodes(t *testing.T) {
 	}
 	if len(nodes) != 1 {
 		t.Fatalf("expected 1 node, got %d", len(nodes))
+	}
+}
+
+func TestDaemonClientDownloadBackup(t *testing.T) {
+	payload := []byte("fake-gzip-backup-archive-bytes")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/backup" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("org_id") != "org-alpha" || q.Get("app") != "micro-crm" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid query"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "nested", "backup.tar.gz")
+
+	client := NewDaemonClient(srv.URL, "secret-tok")
+	if err := client.DownloadBackup(ctx, "org-alpha", "micro-crm", destPath); err != nil {
+		t.Fatalf("DownloadBackup failed: %v", err)
+	}
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("read downloaded backup: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded backup mismatch: got %q, want %q", got, payload)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(destPath))
+	if err != nil {
+		t.Fatalf("readdir dest: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "backup.tar.gz" {
+		t.Fatalf("expected only backup.tar.gz in dest dir, got %+v", entries)
+	}
+
+	unauthPath := filepath.Join(destDir, "unauth.tar.gz")
+	unauthClient := NewDaemonClient(srv.URL, "wrong-tok")
+	err = unauthClient.DownloadBackup(ctx, "org-alpha", "micro-crm", unauthPath)
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error, got %v", err)
+	}
+	if _, statErr := os.Stat(unauthPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no file written on error, got %v", statErr)
 	}
 }

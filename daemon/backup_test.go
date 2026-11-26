@@ -361,3 +361,212 @@ func TestBackupRestoreRejectsCorruptBundle(t *testing.T) {
 		t.Fatalf("expected no audit events on rejected restore, got %+v", events)
 	}
 }
+
+func writeTarGzHeaders(t *testing.T, destPath string, headers []struct {
+	hdr  *tar.Header
+	data []byte
+}) {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	for _, item := range headers {
+		if err := tw.WriteHeader(item.hdr); err != nil {
+			t.Fatalf("WriteHeader %q: %v", item.hdr.Name, err)
+		}
+		if len(item.data) > 0 {
+			if _, err := tw.Write(item.data); err != nil {
+				t.Fatalf("Write %q: %v", item.hdr.Name, err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gzw.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	if err := os.WriteFile(destPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile %q: %v", destPath, err)
+	}
+}
+
+func TestBackupRejectsNonRegularEntries(t *testing.T) {
+	now := time.Now().UTC()
+	manifestBytes, err := json.Marshal(BackupManifest{
+		Version:   backupManifestVersion,
+		CreatedAt: now,
+		OrgID:     "acme",
+		AppName:   "crm",
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		hdr  *tar.Header
+	}{
+		{
+			name: "symlink",
+			hdr: &tar.Header{
+				Name:     "evil-link",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "/etc/passwd",
+				Mode:     0o777,
+				ModTime:  now,
+			},
+		},
+		{
+			name: "hardlink",
+			hdr: &tar.Header{
+				Name:     "evil-hardlink",
+				Typeflag: tar.TypeLink,
+				Linkname: "manifest.json",
+				Mode:     0o600,
+				ModTime:  now,
+			},
+		},
+		{
+			name: "directory",
+			hdr: &tar.Header{
+				Name:     "subdir",
+				Typeflag: tar.TypeDir,
+				Mode:     0o755,
+				ModTime:  now,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bundlePath := filepath.Join(t.TempDir(), tc.name+".tar.gz")
+			writeTarGzHeaders(t, bundlePath, []struct {
+				hdr  *tar.Header
+				data []byte
+			}{
+				{
+					hdr: &tar.Header{
+						Name:     "manifest.json",
+						Typeflag: tar.TypeReg,
+						Mode:     0o600,
+						Size:     int64(len(manifestBytes)),
+						ModTime:  now,
+					},
+					data: manifestBytes,
+				},
+				{
+					hdr: tc.hdr,
+				},
+			})
+
+			if _, err := VerifyBackupBundle(bundlePath); err == nil {
+				t.Fatalf("VerifyBackupBundle expected error for %s entry", tc.name)
+			}
+			if err := extractReplicaFromBundle(bundlePath, t.TempDir()); err == nil {
+				t.Fatalf("extractReplicaFromBundle expected error for %s entry", tc.name)
+			}
+		})
+	}
+}
+
+func TestBackupRejectsPathTraversalEntries(t *testing.T) {
+	now := time.Now().UTC()
+	manifestBytes, err := json.Marshal(BackupManifest{
+		Version:   backupManifestVersion,
+		CreatedAt: now,
+		OrgID:     "acme",
+		AppName:   "crm",
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+
+	badNames := []string{
+		"../evil",
+		"sub/../../evil",
+		"/etc/passwd",
+	}
+
+	for _, badName := range badNames {
+		t.Run(badName, func(t *testing.T) {
+			bundlePath := filepath.Join(t.TempDir(), "traversal.tar.gz")
+			payload := []byte("evil")
+			writeTarGzHeaders(t, bundlePath, []struct {
+				hdr  *tar.Header
+				data []byte
+			}{
+				{
+					hdr: &tar.Header{
+						Name:     "manifest.json",
+						Typeflag: tar.TypeReg,
+						Mode:     0o600,
+						Size:     int64(len(manifestBytes)),
+						ModTime:  now,
+					},
+					data: manifestBytes,
+				},
+				{
+					hdr: &tar.Header{
+						Name:     badName,
+						Typeflag: tar.TypeReg,
+						Mode:     0o600,
+						Size:     int64(len(payload)),
+						ModTime:  now,
+					},
+					data: payload,
+				},
+			})
+
+			if _, err := VerifyBackupBundle(bundlePath); err == nil {
+				t.Fatalf("VerifyBackupBundle expected error for path %q", badName)
+			}
+			if err := extractReplicaFromBundle(bundlePath, t.TempDir()); err == nil {
+				t.Fatalf("extractReplicaFromBundle expected error for path %q", badName)
+			}
+		})
+	}
+}
+
+func TestBackupRejectsOversizedManifestAndSidecar(t *testing.T) {
+	now := time.Now().UTC()
+
+	oversizedManifest := bytes.Repeat([]byte("a"), maxManifestBytes+1)
+	manifestBundle := filepath.Join(t.TempDir(), "oversized-manifest.tar.gz")
+	writeCustomTarGz(t, manifestBundle, map[string][]byte{
+		"manifest.json": oversizedManifest,
+	})
+	if _, err := VerifyBackupBundle(manifestBundle); err == nil {
+		t.Fatal("VerifyBackupBundle expected error for oversized manifest.json")
+	}
+
+	manifestBytes, err := json.Marshal(BackupManifest{
+		Version:   backupManifestVersion,
+		CreatedAt: now,
+		OrgID:     "acme",
+		AppName:   "crm",
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	oversizedSidecar := bytes.Repeat([]byte("0"), maxSidecarBytes+1)
+	sidecarBundle := filepath.Join(t.TempDir(), "oversized-sidecar.tar.gz")
+	writeCustomTarGz(t, sidecarBundle, map[string][]byte{
+		"manifest.json":     manifestBytes,
+		"replica.db.sha256": oversizedSidecar,
+	})
+	if _, err := VerifyBackupBundle(sidecarBundle); err == nil {
+		t.Fatal("VerifyBackupBundle expected error for oversized replica.db.sha256")
+	}
+	if err := extractReplicaFromBundle(sidecarBundle, t.TempDir()); err == nil {
+		t.Fatal("extractReplicaFromBundle expected error for oversized replica.db.sha256")
+	}
+
+	if _, err := validateTarEntry(&tar.Header{
+		Name:     "manifest.json",
+		Typeflag: tar.TypeReg,
+		Size:     -1,
+	}); err == nil {
+		t.Fatal("validateTarEntry expected error for negative size")
+	}
+}

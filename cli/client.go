@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -342,4 +344,84 @@ func (c *DaemonClient) ListNodes(ctx context.Context) ([]daemon.WorkerNode, erro
 		return nil, err
 	}
 	return out.Nodes, nil
+}
+
+func (c *DaemonClient) DownloadBackup(ctx context.Context, orgID, appName, destPath string) error {
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	if base == "" {
+		return errors.New("daemon base URL is empty")
+	}
+	if strings.TrimSpace(destPath) == "" {
+		return errors.New("destPath is required")
+	}
+
+	q := url.Values{}
+	q.Set("org_id", orgID)
+	q.Set("app", appName)
+	path := "/v1/backup?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return fmt.Errorf("build GET %s request: %w", path, err)
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		rawResp, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		var errPayload struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(rawResp, &errPayload)
+		msg := strings.TrimSpace(errPayload.Error)
+		if msg == "" {
+			msg = strings.TrimSpace(string(rawResp))
+		}
+		if msg != "" {
+			return fmt.Errorf("daemon GET %s failed (status %d): %s", path, resp.StatusCode, msg)
+		}
+		return fmt.Errorf("daemon GET %s failed (status %d)", path, resp.StatusCode)
+	}
+
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
+		return fmt.Errorf("mkdir %q: %w", destDir, err)
+	}
+	tmpFile, err := os.CreateTemp(destDir, ".smallcloud-backup-*.tar.gz")
+	if err != nil {
+		return fmt.Errorf("create temp backup file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("write backup archive: %w", err)
+	}
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod backup archive: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close backup archive: %w", err)
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return fmt.Errorf("rename backup archive %q: %w", destPath, err)
+	}
+	cleanup = false
+	return nil
 }

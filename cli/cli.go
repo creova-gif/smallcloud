@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,8 @@ import (
 	"github.com/creova-gif/smallcloud/daemon"
 	"github.com/creova-gif/smallcloud/pkg/config"
 )
+
+var Version = "v0.1.0"
 
 type BundleManifest struct {
 	Config        *config.Config `json:"config"`
@@ -423,8 +426,14 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 	}
 	_ = writeJSON(stdout, map[string]string{"listening": ln.Addr().String(), "state": statePath})
 
+	handler := d.Handler()
+	accessLogEnv := strings.ToLower(strings.TrimSpace(os.Getenv("SMALLCLOUD_ACCESS_LOG")))
+	if accessLogEnv != "0" && accessLogEnv != "false" {
+		handler = daemon.StructuredAccessLogMiddleware(slog.New(slog.NewJSONHandler(os.Stderr, nil)))(handler)
+	}
+
 	srv := &http.Server{
-		Handler:           d.Handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -485,10 +494,13 @@ func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writ
 
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|verify-snapshot|backup|restore-bundle|nodes|serve|eval> [args]")
+		return errors.New("usage: smallcloud <init|doctor|package|deploy|rollback|status|budget|org-quota|meter|rollover|list|destroy|events|logs|canary|prune|verify-snapshot|backup|restore-bundle|nodes|serve|version|eval> [args]")
 	}
 
 	cmd := args[0]
+	if cmd == "version" || cmd == "--version" {
+		return writeJSON(stdout, map[string]string{"version": Version})
+	}
 	if cmd == "init" {
 		return runInit(args[1:], stdout)
 	}
@@ -555,7 +567,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 	var d *daemon.Daemon
 	var client *DaemonClient
 	statePath := filepath.Join(stateDir, "state.json")
-	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune" || cmd == "nodes") {
+	if daemonURL := strings.TrimSpace(os.Getenv("SMALLCLOUD_DAEMON_URL")); daemonURL != "" && (cmd == "deploy" || cmd == "rollback" || cmd == "status" || cmd == "budget" || cmd == "org-quota" || cmd == "meter" || cmd == "rollover" || cmd == "list" || cmd == "ps" || cmd == "destroy" || cmd == "events" || cmd == "logs" || cmd == "canary" || cmd == "prune" || cmd == "backup" || cmd == "nodes") {
 		client = NewDaemonClient(daemonURL, os.Getenv("SMALLCLOUD_API_TOKEN"))
 	} else {
 		d = daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
@@ -924,6 +936,16 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
 		if err != nil {
 			return err
+		}
+		if client != nil {
+			if err := client.DownloadBackup(context.Background(), cfg.App.OrgID, cfg.App.Name, destPath); err != nil {
+				return err
+			}
+			manifest, err := daemon.VerifyBackupBundle(destPath)
+			if err != nil {
+				return err
+			}
+			return writeJSON(stdout, manifest)
 		}
 		manifest, err := daemon.ExportBackupBundle(d, cfg.App.OrgID, cfg.App.Name, destPath)
 		if err != nil {

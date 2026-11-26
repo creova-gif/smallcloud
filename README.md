@@ -96,6 +96,7 @@ smallcloud status ./my-app
 | `nodes` | Manage multi-node worker pool registration and edge routing status | `smallcloud nodes` |
 | `serve` | Start the HTTP control-plane daemon, API, `/metrics`, and Web UI | `smallcloud serve --addr 127.0.0.1:7420` |
 | `eval` | Run the deterministic control-plane evaluation suite | `smallcloud eval` |
+| `version` | Print the `smallcloud` CLI version | `smallcloud version` |
 
 ## Configuration (`smallcloud.toml`)
 
@@ -147,6 +148,7 @@ LOG_LEVEL = "info"
 | `SMALLCLOUD_HEALTH_PROBE_TIMEOUT` | Timeout duration for HTTP readiness probes (e.g., `2s`). |
 | `SMALLCLOUD_ROLLOVER_INTERVAL` | Background interval for automated monthly billing-cycle rollover checks (e.g., `1h`). |
 | `SMALLCLOUD_RATE_LIMIT` | Maximum HTTP API requests per second allowed by `RateLimitMiddleware` (e.g., `20`). |
+| `SMALLCLOUD_ACCESS_LOG` | Log structured JSON HTTP access records to stderr (default `true`). |
 
 ## Benchmark Results
 

@@ -997,3 +997,96 @@ func TestCLIBackupAndRestoreBundle(t *testing.T) {
 		t.Fatalf("verified metadata %+v does not match synced %+v", meta, synced)
 	}
 }
+
+func TestCLIVersion(t *testing.T) {
+	for _, arg := range []string{"version", "--version"} {
+		var out bytes.Buffer
+		if err := Run([]string{arg}, t.TempDir(), &out); err != nil {
+			t.Fatalf("Run(%q) failed: %v", arg, err)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal %q output: %v", arg, err)
+		}
+		if got["version"] != Version {
+			t.Fatalf("Run(%q) version = %q, want %q", arg, got["version"], Version)
+		}
+	}
+}
+
+func TestCLIRemoteBackup(t *testing.T) {
+	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
+	daemonDir := t.TempDir()
+	d := daemon.NewDaemon(filepath.Join(daemonDir, "cgroups"), filepath.Join(daemonDir, "replicas"))
+
+	cfg, err := PackageApp(templateDir)
+	if err != nil {
+		t.Fatalf("PackageApp failed: %v", err)
+	}
+	if _, err := d.Deploy(cfg.Config, "v1.0.0"); err != nil {
+		t.Fatalf("Deploy failed: %v", err)
+	}
+	dbFile := filepath.Join(t.TempDir(), "app.db")
+	if err := os.WriteFile(dbFile, []byte("SQLite format 3\x00remote-backup-test"), 0o600); err != nil {
+		t.Fatalf("write db file: %v", err)
+	}
+	synced, err := d.Storage().SyncWAL(cfg.Config.App.OrgID, cfg.Config.App.Name, dbFile)
+	if err != nil {
+		t.Fatalf("SyncWAL failed: %v", err)
+	}
+
+	const token = "cli-remote-backup-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/backup" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		q := r.URL.Query()
+		tmpBundle := filepath.Join(t.TempDir(), "bundle.tar.gz")
+		if _, err := daemon.ExportBackupBundle(d, q.Get("org_id"), q.Get("app"), tmpBundle); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(err.Error()))
+			return
+		}
+		raw, err := os.ReadFile(tmpBundle)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+	}))
+	defer srv.Close()
+
+	t.Setenv("SMALLCLOUD_DAEMON_URL", srv.URL)
+	t.Setenv("SMALLCLOUD_API_TOKEN", token)
+
+	localStateDir := t.TempDir()
+	destPath := filepath.Join(t.TempDir(), "remote-backup.tar.gz")
+	var out bytes.Buffer
+	if err := Run([]string{"backup", templateDir, destPath}, localStateDir, &out); err != nil {
+		t.Fatalf("remote backup failed: %v", err)
+	}
+	var manifest daemon.BackupManifest
+	if err := json.Unmarshal(out.Bytes(), &manifest); err != nil {
+		t.Fatalf("unmarshal remote backup manifest: %v", err)
+	}
+	if manifest.OrgID != cfg.Config.App.OrgID || manifest.AppName != cfg.Config.App.Name {
+		t.Fatalf("unexpected manifest tenant: %+v", manifest)
+	}
+	if manifest.Snapshot == nil || manifest.Snapshot.SHA256 != synced.SHA256 {
+		t.Fatalf("expected snapshot sha256 %s, got %+v", synced.SHA256, manifest.Snapshot)
+	}
+	if _, err := daemon.VerifyBackupBundle(destPath); err != nil {
+		t.Fatalf("VerifyBackupBundle on downloaded file failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localStateDir, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no local state.json when routing backup to remote daemon, got %v", err)
+	}
+}

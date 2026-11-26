@@ -11,12 +11,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-const backupManifestVersion = "1"
+const (
+	backupManifestVersion = "1"
+	maxManifestBytes      = 1 << 20
+	maxSidecarBytes       = 4096
+)
 
 type BackupManifest struct {
 	Version   string            `json:"version"`
@@ -217,15 +222,16 @@ func VerifyBackupBundle(bundlePath string) (BackupManifest, error) {
 		if err != nil {
 			return BackupManifest{}, fmt.Errorf("read tar entry: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
-			continue
+		cleanName, err := validateTarEntry(hdr)
+		if err != nil {
+			return BackupManifest{}, err
 		}
 
-		switch hdr.Name {
+		switch cleanName {
 		case "manifest.json":
-			data, err := io.ReadAll(tr)
+			data, err := readBoundedTarEntry(tr, "manifest.json", maxManifestBytes)
 			if err != nil {
-				return BackupManifest{}, fmt.Errorf("read manifest.json: %w", err)
+				return BackupManifest{}, err
 			}
 			if err := json.Unmarshal(data, &manifest); err != nil {
 				return BackupManifest{}, fmt.Errorf("decode manifest.json: %w", err)
@@ -239,9 +245,9 @@ func VerifyBackupBundle(bundlePath string) (BackupManifest, error) {
 			replicaSum = hex.EncodeToString(hasher.Sum(nil))
 			hasReplica = true
 		case "replica.db.sha256":
-			data, err := io.ReadAll(tr)
+			data, err := readBoundedTarEntry(tr, "replica.db.sha256", maxSidecarBytes)
 			if err != nil {
-				return BackupManifest{}, fmt.Errorf("read replica.db.sha256: %w", err)
+				return BackupManifest{}, err
 			}
 			sidecarSum = strings.TrimSpace(string(data))
 			hasSidecar = true
@@ -343,14 +349,25 @@ func extractReplicaFromBundle(bundlePath, targetDir string) error {
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
-			continue
-		}
-		if hdr.Name != "replica.db" && hdr.Name != "replica.db.sha256" {
-			continue
-		}
-		if err := writeAtomicFile(targetDir, filepath.Join(targetDir, hdr.Name), tr); err != nil {
+		cleanName, err := validateTarEntry(hdr)
+		if err != nil {
 			return err
+		}
+		switch cleanName {
+		case "replica.db":
+			if err := writeAtomicFile(targetDir, filepath.Join(targetDir, cleanName), tr); err != nil {
+				return err
+			}
+		case "replica.db.sha256":
+			data, err := readBoundedTarEntry(tr, "replica.db.sha256", maxSidecarBytes)
+			if err != nil {
+				return err
+			}
+			if err := writeAtomicFile(targetDir, filepath.Join(targetDir, cleanName), bytes.NewReader(data)); err != nil {
+				return err
+			}
+		default:
+			continue
 		}
 	}
 
@@ -358,6 +375,34 @@ func extractReplicaFromBundle(bundlePath, targetDir string) error {
 		return fmt.Errorf("verify gzip stream: %w", err)
 	}
 	return nil
+}
+
+func validateTarEntry(hdr *tar.Header) (string, error) {
+	if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+		return "", fmt.Errorf("unsupported tar entry type %q for %q", hdr.Typeflag, hdr.Name)
+	}
+	if hdr.Size < 0 {
+		return "", fmt.Errorf("invalid negative size %d for tar entry %q", hdr.Size, hdr.Name)
+	}
+	if strings.HasPrefix(hdr.Name, "/") {
+		return "", fmt.Errorf("invalid tar entry path %q", hdr.Name)
+	}
+	cleanName := path.Clean(hdr.Name)
+	if strings.HasPrefix(cleanName, "/") || strings.Contains(cleanName, "..") {
+		return "", fmt.Errorf("invalid tar entry path %q", hdr.Name)
+	}
+	return cleanName, nil
+}
+
+func readBoundedTarEntry(tr *tar.Reader, name string, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(tr, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds max size of %d bytes", name, limit)
+	}
+	return data, nil
 }
 
 func writeAtomicFile(dir, destPath string, r io.Reader) error {
