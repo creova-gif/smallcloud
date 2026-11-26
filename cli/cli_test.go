@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/creova-gif/smallcloud/daemon"
 )
@@ -120,5 +122,22 @@ func TestCLIDeployRollbackStatusBudgetAndEval(t *testing.T) {
 	}
 	if !report.Passed || report.HardStopEnforcement != 100.0 || report.DataLossBytes != 0 {
 		t.Fatalf("eval thresholds not met: %+v", report)
+	}
+}
+
+func TestCLIServeGracefulShutdownAndPersist(t *testing.T) {
+	stateDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	var out bytes.Buffer
+	if err := ServeWithContext(ctx, "127.0.0.1:0", stateDir, &out); err != nil {
+		t.Fatalf("ServeWithContext failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "listening") {
+		t.Fatalf("expected listening JSON output, got %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "state.json")); err != nil {
+		t.Fatalf("expected state.json persisted on shutdown: %v", err)
 	}
 }

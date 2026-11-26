@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,40 +54,55 @@ func (s *StorageManager) HasReplica(orgID, appName string) bool {
 	return err == nil
 }
 
-func writeFileAtomic(dest string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(dest)
+func stageFileFromReader(dir string, r io.Reader, perm os.FileMode) (string, int64, string, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("mkdir %q: %w", dir, err)
+		return "", 0, "", fmt.Errorf("mkdir %q: %w", dir, err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return "", 0, "", fmt.Errorf("create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	cleanup := func() {
 		_ = os.Remove(tmpName)
 	}
 
-	if _, err := tmp.Write(data); err != nil {
+	hasher := sha256.New()
+	n, err := io.Copy(tmp, io.TeeReader(r, hasher))
+	if err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("write temp file: %w", err)
+		return "", 0, "", fmt.Errorf("write temp file: %w", err)
 	}
 	if err := tmp.Chmod(perm); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("chmod temp file: %w", err)
+		return "", 0, "", fmt.Errorf("chmod temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
-		return fmt.Errorf("close temp file: %w", err)
+		return "", 0, "", fmt.Errorf("close temp file: %w", err)
+	}
+
+	return tmpName, n, hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func writeFileAtomicFromReader(dest string, r io.Reader, perm os.FileMode) (int64, string, error) {
+	tmpName, n, hexSum, err := stageFileFromReader(filepath.Dir(dest), r, perm)
+	if err != nil {
+		return 0, "", err
 	}
 	if err := os.Rename(tmpName, dest); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic rename %q: %w", dest, err)
+		_ = os.Remove(tmpName)
+		return 0, "", fmt.Errorf("atomic rename %q: %w", dest, err)
 	}
-	return nil
+	return n, hexSum, nil
+}
+
+func writeFileAtomic(dest string, data []byte, perm os.FileMode) error {
+	_, _, err := writeFileAtomicFromReader(dest, bytes.NewReader(data), perm)
+	return err
 }
 
 func (s *StorageManager) SyncWAL(orgID, appName, sqliteHostPath string) (*SnapshotMetadata, error) {
@@ -96,16 +113,15 @@ func (s *StorageManager) SyncWAL(orgID, appName, sqliteHostPath string) (*Snapsh
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(sqliteHostPath)
+	f, err := os.Open(sqliteHostPath)
 	if err != nil {
 		return nil, fmt.Errorf("read sqlite file %q: %w", sqliteHostPath, err)
 	}
-
-	sum := sha256.Sum256(data)
-	hexSum := hex.EncodeToString(sum[:])
+	defer f.Close()
 
 	dest := s.replicaPath(orgID, appName)
-	if err := writeFileAtomic(dest, data, 0o600); err != nil {
+	sizeBytes, hexSum, err := writeFileAtomicFromReader(dest, f, 0o600)
+	if err != nil {
 		return nil, err
 	}
 	if err := writeFileAtomic(dest+".sha256", []byte(hexSum+"\n"), 0o600); err != nil {
@@ -119,7 +135,7 @@ func (s *StorageManager) SyncWAL(orgID, appName, sqliteHostPath string) (*Snapsh
 		OrgID:      orgID,
 		AppName:    appName,
 		Generation: s.generations[key],
-		SizeBytes:  int64(len(data)),
+		SizeBytes:  sizeBytes,
 		SHA256:     hexSum,
 		SyncedAt:   time.Now().UTC(),
 	}, nil
@@ -134,25 +150,33 @@ func (s *StorageManager) Restore(orgID, appName, sqliteHostPath string) (*Snapsh
 	defer s.mu.Unlock()
 
 	src := s.replicaPath(orgID, appName)
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return nil, fmt.Errorf("read replica %q: %w", src, err)
-	}
 
-	sum := sha256.Sum256(data)
-	hexSum := hex.EncodeToString(sum[:])
-
+	var expected string
 	if expectedBytes, err := os.ReadFile(src + ".sha256"); err == nil {
-		expected := strings.TrimSpace(string(expectedBytes))
-		if expected != "" && expected != hexSum {
-			return nil, fmt.Errorf("%w: got %s, want %s", ErrChecksumMismatch, hexSum, expected)
-		}
+		expected = strings.TrimSpace(string(expectedBytes))
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read replica checksum: %w", err)
 	}
 
-	if err := writeFileAtomic(sqliteHostPath, data, 0o600); err != nil {
+	f, err := os.Open(src)
+	if err != nil {
+		return nil, fmt.Errorf("read replica %q: %w", src, err)
+	}
+	defer f.Close()
+
+	tmpName, sizeBytes, hexSum, err := stageFileFromReader(filepath.Dir(sqliteHostPath), f, 0o600)
+	if err != nil {
 		return nil, err
+	}
+
+	if expected != "" && expected != hexSum {
+		_ = os.Remove(tmpName)
+		return nil, fmt.Errorf("%w: got %s, want %s", ErrChecksumMismatch, hexSum, expected)
+	}
+
+	if err := os.Rename(tmpName, sqliteHostPath); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, fmt.Errorf("atomic rename %q: %w", sqliteHostPath, err)
 	}
 
 	key := tenantKey(orgID, appName)
@@ -161,7 +185,7 @@ func (s *StorageManager) Restore(orgID, appName, sqliteHostPath string) (*Snapsh
 		OrgID:      orgID,
 		AppName:    appName,
 		Generation: s.generations[key],
-		SizeBytes:  int64(len(data)),
+		SizeBytes:  sizeBytes,
 		SHA256:     hexSum,
 		SyncedAt:   time.Now().UTC(),
 	}, nil

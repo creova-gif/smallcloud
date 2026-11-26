@@ -28,15 +28,24 @@ type BudgetEvent struct {
 	MaxMonthlyUSD float64      `json:"max_monthly_usd"`
 }
 
+type MonthlyArchive struct {
+	BillingMonth  string    `json:"billing_month"`
+	TotalUSD      float64   `json:"total_usd"`
+	MaxMonthlyUSD float64   `json:"max_monthly_usd"`
+	ArchivedAt    time.Time `json:"archived_at"`
+}
+
 type AppBudgetState struct {
-	OrgID         string        `json:"org_id"`
-	AppName       string        `json:"app_name"`
-	MaxMonthlyUSD float64       `json:"max_monthly_usd"`
-	AlertAtPct    float64       `json:"alert_at_pct"`
-	CurrentUSD    float64       `json:"current_usd"`
-	Status        BudgetStatus  `json:"status"`
-	Halted        bool          `json:"halted"`
-	Events        []BudgetEvent `json:"events,omitempty"`
+	OrgID         string           `json:"org_id"`
+	AppName       string           `json:"app_name"`
+	MaxMonthlyUSD float64          `json:"max_monthly_usd"`
+	AlertAtPct    float64          `json:"alert_at_pct"`
+	CurrentUSD    float64          `json:"current_usd"`
+	BillingMonth  string           `json:"billing_month"`
+	Status        BudgetStatus     `json:"status"`
+	Halted        bool             `json:"halted"`
+	Events        []BudgetEvent    `json:"events,omitempty"`
+	History       []MonthlyArchive `json:"history,omitempty"`
 }
 
 type BudgetTracker struct {
@@ -84,14 +93,16 @@ func (b *BudgetTracker) RegisterApp(orgID, appName string, maxMonthlyUSD, alertA
 	key := tenantKey(orgID, appName)
 	existing, ok := b.states[key]
 	if !ok {
+		now := time.Now().UTC()
 		b.states[key] = &AppBudgetState{
 			OrgID:         orgID,
 			AppName:       appName,
 			MaxMonthlyUSD: maxMonthlyUSD,
 			AlertAtPct:    alertAtPct,
+			BillingMonth:  now.Format("2006-01"),
 			Status:        BudgetOK,
 			Events: []BudgetEvent{{
-				Timestamp:     time.Now().UTC(),
+				Timestamp:     now,
 				Status:        BudgetOK,
 				CurrentUSD:    0,
 				MaxMonthlyUSD: maxMonthlyUSD,
@@ -102,6 +113,9 @@ func (b *BudgetTracker) RegisterApp(orgID, appName string, maxMonthlyUSD, alertA
 	}
 
 	wasHalted := existing.Halted
+	if existing.BillingMonth == "" {
+		existing.BillingMonth = time.Now().UTC().Format("2006-01")
+	}
 	existing.MaxMonthlyUSD = maxMonthlyUSD
 	existing.AlertAtPct = alertAtPct
 	b.recomputeLocked(existing, wasHalted)
@@ -177,6 +191,80 @@ func (b *BudgetTracker) RecordSpend(orgID, appName string, deltaUSD float64) (Ap
 	return snapshot, nil
 }
 
+type unhaltTarget struct {
+	orgID   string
+	appName string
+}
+
+func (b *BudgetTracker) RolloverIfNewMonth(orgID, appName string, now time.Time) (AppBudgetState, bool, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return AppBudgetState{}, false, err
+	}
+
+	nowUTC := now.UTC()
+	targetMonth := nowUTC.Format("2006-01")
+
+	b.mu.Lock()
+	st, ok := b.states[tenantKey(orgID, appName)]
+	if !ok {
+		b.mu.Unlock()
+		return AppBudgetState{}, false, fmt.Errorf("app %q not registered for org %q", appName, orgID)
+	}
+
+	if st.BillingMonth == targetMonth {
+		snapshot := cloneBudgetState(st)
+		b.mu.Unlock()
+		return snapshot, false, nil
+	}
+
+	shouldUnhalt := b.rolloverLocked(st, targetMonth, nowUTC)
+	snapshot := cloneBudgetState(st)
+	b.mu.Unlock()
+
+	if shouldUnhalt {
+		b.onUnhalt(orgID, appName)
+	}
+	return snapshot, true, nil
+}
+
+func (b *BudgetTracker) RolloverAll(now time.Time) int {
+	nowUTC := now.UTC()
+	targetMonth := nowUTC.Format("2006-01")
+
+	b.mu.Lock()
+	rolledOver := 0
+	var toUnhalt []unhaltTarget
+	for _, st := range b.states {
+		if st.BillingMonth == targetMonth {
+			continue
+		}
+		rolledOver++
+		if b.rolloverLocked(st, targetMonth, nowUTC) {
+			toUnhalt = append(toUnhalt, unhaltTarget{orgID: st.OrgID, appName: st.AppName})
+		}
+	}
+	b.mu.Unlock()
+
+	for _, target := range toUnhalt {
+		b.onUnhalt(target.orgID, target.appName)
+	}
+	return rolledOver
+}
+
+func (b *BudgetTracker) rolloverLocked(st *AppBudgetState, targetMonth string, archivedAt time.Time) bool {
+	wasHalted := st.Halted
+	st.History = append(st.History, MonthlyArchive{
+		BillingMonth:  st.BillingMonth,
+		TotalUSD:      st.CurrentUSD,
+		MaxMonthlyUSD: st.MaxMonthlyUSD,
+		ArchivedAt:    archivedAt,
+	})
+	st.CurrentUSD = 0
+	st.BillingMonth = targetMonth
+	b.recomputeLocked(st, wasHalted)
+	return wasHalted && !st.Halted && b.onUnhalt != nil
+}
+
 func (b *BudgetTracker) CheckAllowed(orgID, appName string) error {
 	if err := validateTenantSlugs(orgID, appName); err != nil {
 		return err
@@ -235,6 +323,9 @@ func cloneBudgetState(st *AppBudgetState) AppBudgetState {
 	cp := *st
 	if len(st.Events) > 0 {
 		cp.Events = append([]BudgetEvent(nil), st.Events...)
+	}
+	if len(st.History) > 0 {
+		cp.History = append([]MonthlyArchive(nil), st.History...)
 	}
 	return cp
 }

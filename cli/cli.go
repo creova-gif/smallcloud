@@ -2,13 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/creova-gif/smallcloud/daemon"
@@ -282,14 +287,73 @@ func runBudget(args []string, d *daemon.Daemon, statePath string, stdout io.Writ
 	return writeJSON(stdout, st)
 }
 
+func ServeWithContext(ctx context.Context, addr, stateDir string, stdout io.Writer) error {
+	if addr == "" {
+		addr = "127.0.0.1:7420"
+	}
+	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	statePath := filepath.Join(stateDir, "state.json")
+	if err := d.LoadState(statePath); err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %q: %w", addr, err)
+	}
+	_ = writeJSON(stdout, map[string]string{"listening": ln.Addr().String(), "state": statePath})
+
+	srv := &http.Server{
+		Handler:           d.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return <-errCh
+	case err := <-errCh:
+		if saveErr := d.SaveState(statePath); saveErr != nil && err == nil {
+			return saveErr
+		}
+		return err
+	}
+}
+
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <init|package|deploy|rollback|status|budget|eval> [args]")
+		return errors.New("usage: smallcloud <init|package|deploy|rollback|status|budget|serve|eval> [args]")
 	}
 
 	cmd := args[0]
 	if cmd == "init" {
 		return runInit(args[1:], stdout)
+	}
+	if cmd == "serve" {
+		addr := "127.0.0.1:7420"
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--addr" && i+1 < len(args) {
+				addr = args[i+1]
+				i++
+			}
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return ServeWithContext(ctx, addr, stateDir, stdout)
 	}
 
 	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
