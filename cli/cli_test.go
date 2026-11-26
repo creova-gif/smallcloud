@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,20 +31,47 @@ func TestPackageFastAPITemplate(t *testing.T) {
 	}
 }
 
-func TestCLIDeployRollbackAndEval(t *testing.T) {
+func TestCLIInitAndErrors(t *testing.T) {
+	appDir := filepath.Join(t.TempDir(), "my-micro-saas")
+	var out bytes.Buffer
+	if err := Run([]string{"init", appDir}, t.TempDir(), &out); err != nil {
+		t.Fatalf("cli init failed: %v", err)
+	}
+	tomlPath := filepath.Join(appDir, "smallcloud.toml")
+	if _, err := os.Stat(tomlPath); err != nil {
+		t.Fatalf("expected smallcloud.toml to exist: %v", err)
+	}
+	if err := Run([]string{"init", appDir}, t.TempDir(), &out); err == nil {
+		t.Fatal("expected init without --force to refuse overwrite")
+	}
+	if err := Run([]string{"init", appDir, "--force"}, t.TempDir(), &out); err != nil {
+		t.Fatalf("init with --force failed: %v", err)
+	}
+}
+
+func TestCLIDeployRollbackStatusBudgetAndEval(t *testing.T) {
 	templateDir := filepath.Join("..", "templates", "fastapi-sqlite")
 	stateDir := t.TempDir()
 
-	var deployOut bytes.Buffer
-	if err := Run([]string{"deploy", templateDir, "v2.0.0"}, stateDir, &deployOut); err != nil {
-		t.Fatalf("cli deploy failed: %v", err)
+	var deploy1Out bytes.Buffer
+	if err := Run([]string{"deploy", templateDir, "v1.0.0"}, stateDir, &deploy1Out); err != nil {
+		t.Fatalf("cli deploy v1 failed: %v", err)
 	}
-	var deployRes daemon.DeploymentResult
-	if err := json.Unmarshal(deployOut.Bytes(), &deployRes); err != nil {
-		t.Fatalf("unmarshal deploy result: %v", err)
+	var deployRes1 daemon.DeploymentResult
+	if err := json.Unmarshal(deploy1Out.Bytes(), &deployRes1); err != nil {
+		t.Fatalf("unmarshal deploy1 result: %v", err)
 	}
-	if deployRes.ReleaseID != "v2.0.0" || deployRes.ActiveColor != daemon.ColorBlue {
-		t.Fatalf("unexpected deploy result: %+v", deployRes)
+	if deployRes1.ReleaseID != "v1.0.0" || deployRes1.ActiveColor != daemon.ColorBlue {
+		t.Fatalf("unexpected deploy1 result: %+v", deployRes1)
+	}
+
+	if err := Run([]string{"rollback", templateDir}, stateDir, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected rollback with single release to fail")
+	}
+
+	var deploy2Out bytes.Buffer
+	if err := Run([]string{"deploy", templateDir, "v1.1.0"}, stateDir, &deploy2Out); err != nil {
+		t.Fatalf("cli deploy v1.1 failed: %v", err)
 	}
 
 	var rollbackOut bytes.Buffer
@@ -56,6 +84,30 @@ func TestCLIDeployRollbackAndEval(t *testing.T) {
 	}
 	if routeRes.ActiveReleaseID != "v1.0.0" || routeRes.StandbyReleaseID != "v1.1.0" {
 		t.Fatalf("expected rollback to restore v1.0.0 from v1.1.0, got %+v", routeRes)
+	}
+
+	var statusOut bytes.Buffer
+	if err := Run([]string{"status", templateDir}, stateDir, &statusOut); err != nil {
+		t.Fatalf("cli status failed: %v", err)
+	}
+	var st daemon.AppStatus
+	if err := json.Unmarshal(statusOut.Bytes(), &st); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if st.Route.ActiveReleaseID != "v1.0.0" {
+		t.Fatalf("expected status active v1.0.0, got %+v", st)
+	}
+
+	var budgetOut bytes.Buffer
+	if err := Run([]string{"budget", "set", templateDir, "12.50"}, stateDir, &budgetOut); err != nil {
+		t.Fatalf("cli budget set failed: %v", err)
+	}
+	var bState daemon.AppBudgetState
+	if err := json.Unmarshal(budgetOut.Bytes(), &bState); err != nil {
+		t.Fatalf("unmarshal budget state: %v", err)
+	}
+	if bState.MaxMonthlyUSD != 12.50 {
+		t.Fatalf("expected max_monthly_usd 12.50, got %v", bState.MaxMonthlyUSD)
 	}
 
 	var evalOut bytes.Buffer

@@ -3,6 +3,9 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,6 +16,48 @@ const (
 	ColorBlue  ReleaseColor = "blue"
 	ColorGreen ReleaseColor = "green"
 )
+
+type ProxyApplier interface {
+	ApplyConfig(domain, caddyfile string) error
+}
+
+type NoopApplier struct{}
+
+func (NoopApplier) ApplyConfig(_, _ string) error {
+	return nil
+}
+
+type HTTPAdminApplier struct {
+	AdminURL string
+	Client   *http.Client
+}
+
+func (a HTTPAdminApplier) ApplyConfig(_ string, caddyfile string) error {
+	client := a.Client
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
+	endpoint := strings.TrimRight(a.AdminURL, "/") + "/load"
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(caddyfile))
+	if err != nil {
+		return fmt.Errorf("build caddy admin request: %w", err)
+	}
+	req.Header.Set("Content-Type", "text/caddyfile")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("apply caddy config: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("caddy admin rejected config (status %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
 
 type RouteEntry struct {
 	OrgID            string       `json:"org_id"`
@@ -29,19 +74,41 @@ type RouteEntry struct {
 }
 
 type CaddyRouter struct {
-	mu     sync.RWMutex
-	routes map[string]*RouteEntry
+	mu      sync.RWMutex
+	routes  map[string]*RouteEntry
+	applier ProxyApplier
 }
 
 func NewCaddyRouter() *CaddyRouter {
+	return NewCaddyRouterWithApplier(NoopApplier{})
+}
+
+func NewCaddyRouterWithApplier(applier ProxyApplier) *CaddyRouter {
+	if applier == nil {
+		applier = NoopApplier{}
+	}
 	return &CaddyRouter{
-		routes: make(map[string]*RouteEntry),
+		routes:  make(map[string]*RouteEntry),
+		applier: applier,
 	}
 }
 
+func (r *CaddyRouter) SetApplier(applier ProxyApplier) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if applier == nil {
+		applier = NoopApplier{}
+	}
+	r.applier = applier
+}
+
 func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream string) (RouteEntry, error) {
-	if orgID == "" || appName == "" || domain == "" || releaseID == "" || upstream == "" {
-		return RouteEntry{}, errors.New("orgID, appName, domain, releaseID, and upstream are required")
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return RouteEntry{}, err
+	}
+	if domain == "" || releaseID == "" || upstream == "" {
+		return RouteEntry{}, errors.New("domain, releaseID, and upstream are required")
 	}
 
 	r.mu.Lock()
@@ -49,10 +116,15 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 
 	key := tenantKey(orgID, appName)
 	curr, exists := r.routes[key]
+	var prevCopy RouteEntry
+	if exists {
+		prevCopy = *curr
+	}
 	now := time.Now().UTC()
 
+	var next RouteEntry
 	if !exists {
-		entry := &RouteEntry{
+		next = RouteEntry{
 			OrgID:           orgID,
 			AppName:         appName,
 			Domain:          domain,
@@ -61,48 +133,77 @@ func (r *CaddyRouter) SwapRoute(orgID, appName, domain, releaseID, upstream stri
 			ActiveUpstream:  upstream,
 			UpdatedAt:       now,
 		}
-		r.routes[key] = entry
-		return *entry, nil
+	} else {
+		nextColor := ColorGreen
+		if curr.ActiveColor == ColorGreen {
+			nextColor = ColorBlue
+		}
+		next = RouteEntry{
+			OrgID:            orgID,
+			AppName:          appName,
+			Domain:           domain,
+			ActiveColor:      nextColor,
+			ActiveReleaseID:  releaseID,
+			ActiveUpstream:   upstream,
+			StandbyColor:     curr.ActiveColor,
+			StandbyReleaseID: curr.ActiveReleaseID,
+			StandbyUpstream:  curr.ActiveUpstream,
+			Halted:           false,
+			UpdatedAt:        now,
+		}
 	}
 
-	nextColor := ColorGreen
-	if curr.ActiveColor == ColorGreen {
-		nextColor = ColorBlue
+	if err := r.applier.ApplyConfig(next.Domain, RenderCaddyfile(next, "")); err != nil {
+		if exists {
+			restored := prevCopy
+			r.routes[key] = &restored
+		}
+		return RouteEntry{}, err
 	}
 
-	curr.StandbyColor = curr.ActiveColor
-	curr.StandbyReleaseID = curr.ActiveReleaseID
-	curr.StandbyUpstream = curr.ActiveUpstream
-
-	curr.Domain = domain
-	curr.ActiveColor = nextColor
-	curr.ActiveReleaseID = releaseID
-	curr.ActiveUpstream = upstream
-	curr.Halted = false
-	curr.UpdatedAt = now
-
-	return *curr, nil
+	r.routes[key] = &next
+	return next, nil
 }
 
+var (
+	ErrNoRouteFound     = errors.New("no route registered")
+	ErrNoStandbyRelease = errors.New("no standby release available to roll back")
+)
+
 func (r *CaddyRouter) Rollback(orgID, appName string) (RouteEntry, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return RouteEntry{}, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	key := tenantKey(orgID, appName)
 	curr, exists := r.routes[key]
 	if !exists {
-		return RouteEntry{}, fmt.Errorf("no route registered for %s/%s", orgID, appName)
+		return RouteEntry{}, fmt.Errorf("%w for %s/%s", ErrNoRouteFound, orgID, appName)
+	}
+	if curr.Halted {
+		return RouteEntry{}, ErrBudgetExceeded
 	}
 	if curr.StandbyReleaseID == "" || curr.StandbyUpstream == "" {
-		return RouteEntry{}, fmt.Errorf("no standby release available to roll back for %s/%s", orgID, appName)
+		return RouteEntry{}, fmt.Errorf("%w for %s/%s", ErrNoStandbyRelease, orgID, appName)
 	}
 
-	curr.ActiveColor, curr.StandbyColor = curr.StandbyColor, curr.ActiveColor
-	curr.ActiveReleaseID, curr.StandbyReleaseID = curr.StandbyReleaseID, curr.ActiveReleaseID
-	curr.ActiveUpstream, curr.StandbyUpstream = curr.StandbyUpstream, curr.ActiveUpstream
-	curr.UpdatedAt = time.Now().UTC()
+	prevCopy := *curr
+	next := *curr
+	next.ActiveColor, next.StandbyColor = curr.StandbyColor, curr.ActiveColor
+	next.ActiveReleaseID, next.StandbyReleaseID = curr.StandbyReleaseID, curr.ActiveReleaseID
+	next.ActiveUpstream, next.StandbyUpstream = curr.StandbyUpstream, curr.ActiveUpstream
+	next.UpdatedAt = time.Now().UTC()
 
-	return *curr, nil
+	if err := r.applier.ApplyConfig(next.Domain, RenderCaddyfile(next, "")); err != nil {
+		r.routes[key] = &prevCopy
+		return RouteEntry{}, err
+	}
+
+	r.routes[key] = &next
+	return next, nil
 }
 
 func (r *CaddyRouter) HaltRoute(orgID, appName string) {
@@ -112,7 +213,26 @@ func (r *CaddyRouter) HaltRoute(orgID, appName string) {
 	if curr, exists := r.routes[tenantKey(orgID, appName)]; exists {
 		curr.Halted = true
 		curr.UpdatedAt = time.Now().UTC()
+		_ = r.applier.ApplyConfig(curr.Domain, RenderCaddyfile(*curr, ""))
 	}
+}
+
+func (r *CaddyRouter) ResumeRoute(orgID, appName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	curr, exists := r.routes[tenantKey(orgID, appName)]
+	if !exists {
+		return nil
+	}
+	prev := *curr
+	curr.Halted = false
+	curr.UpdatedAt = time.Now().UTC()
+	if err := r.applier.ApplyConfig(curr.Domain, RenderCaddyfile(*curr, "")); err != nil {
+		*curr = prev
+		return err
+	}
+	return nil
 }
 
 func (r *CaddyRouter) GetRoute(orgID, appName string) (RouteEntry, bool) {
@@ -124,6 +244,32 @@ func (r *CaddyRouter) GetRoute(orgID, appName string) (RouteEntry, bool) {
 		return RouteEntry{}, false
 	}
 	return *curr, true
+}
+
+func (r *CaddyRouter) SnapshotRoutes() map[string]*RouteEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make(map[string]*RouteEntry, len(r.routes))
+	for k, v := range r.routes {
+		cp := *v
+		out[k] = &cp
+	}
+	return out
+}
+
+func (r *CaddyRouter) RestoreRoutes(routes map[string]*RouteEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.routes = make(map[string]*RouteEntry, len(routes))
+	for k, v := range routes {
+		if v == nil {
+			continue
+		}
+		cp := *v
+		r.routes[k] = &cp
+	}
 }
 
 func RenderCaddyfile(entry RouteEntry, healthPath string) string {

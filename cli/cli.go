@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/creova-gif/smallcloud/daemon"
@@ -30,6 +31,12 @@ type EvalReport struct {
 	DataLossBytes        int64   `json:"data_loss_bytes"`
 	ZeroDowntimeSwap     bool    `json:"zero_downtime_swap"`
 	Passed               bool    `json:"passed"`
+}
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 func PackageApp(appDir string) (*BundleManifest, error) {
@@ -143,7 +150,7 @@ func RunEvalSuite(workDir string) (*EvalReport, error) {
 	}
 
 	blockedCount := 0
-	_, spendErr := d.Budget().RecordSpend(cfg.App.OrgID, cfg.App.Name, 5.00)
+	_, spendErr := d.RecordSpend(cfg.App.OrgID, cfg.App.Name, 5.00)
 	if errors.Is(spendErr, daemon.ErrBudgetExceeded) {
 		for i := 0; i < 100; i++ {
 			if errors.Is(d.Budget().CheckAllowed(cfg.App.OrgID, cfg.App.Name), daemon.ErrBudgetExceeded) {
@@ -171,13 +178,127 @@ func RunEvalSuite(workDir string) (*EvalReport, error) {
 	}, nil
 }
 
+func runInit(args []string, stdout io.Writer) error {
+	dir := "."
+	force := false
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+		} else {
+			dir = a
+		}
+	}
+
+	tomlPath := filepath.Join(dir, "smallcloud.toml")
+	if !force {
+		if _, err := os.Stat(tomlPath); err == nil {
+			return fmt.Errorf("%s already exists (pass --force to overwrite)", tomlPath)
+		}
+	}
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	appName := filepath.Base(absDir)
+	if !config.IsValidSlug(appName) {
+		appName = "smallcloud-app"
+	}
+
+	starter := fmt.Sprintf(`[app]
+name = %q
+org_id = "org-indie-default"
+domain = "%s.smallcloud.dev"
+port = 8000
+healthcheck = "/healthz"
+runtime = "dockerfile"
+
+[resources]
+cpu_millicores = 500
+memory_mb = 256
+
+[budget]
+max_monthly_usd = 5.00
+alert_at_pct = 80.0
+hard_stop = true
+
+[storage]
+sqlite_path = "/data/app.db"
+replica_url = "gs://smallcloud-replicas/org-indie-default/%s"
+sync_ms = 1000
+`, appName, appName, appName)
+
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	if err := os.WriteFile(tomlPath, []byte(starter), 0o600); err != nil {
+		return err
+	}
+	return writeJSON(stdout, map[string]string{"initialized": tomlPath, "app_name": appName})
+}
+
+func runBudget(args []string, d *daemon.Daemon, statePath string, stdout io.Writer) error {
+	if len(args) > 0 && args[0] == "set" {
+		args = args[1:]
+	}
+	dir := "."
+	var newMax *float64
+	switch len(args) {
+	case 1:
+		if v, err := strconv.ParseFloat(args[0], 64); err == nil {
+			newMax = &v
+		} else {
+			dir = args[0]
+		}
+	case 2:
+		dir = args[0]
+		v, err := strconv.ParseFloat(args[1], 64)
+		if err != nil {
+			return fmt.Errorf("invalid max_monthly_usd %q: %w", args[1], err)
+		}
+		newMax = &v
+	}
+
+	cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+	if err != nil {
+		return err
+	}
+
+	if newMax != nil {
+		st, err := d.SetMaxBudget(cfg.App.OrgID, cfg.App.Name, *newMax)
+		if err != nil {
+			return err
+		}
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, st)
+	}
+
+	st, ok := d.Budget().State(cfg.App.OrgID, cfg.App.Name)
+	if !ok {
+		return fmt.Errorf("app %q not deployed yet for org %q", cfg.App.Name, cfg.App.OrgID)
+	}
+	return writeJSON(stdout, st)
+}
+
 func Run(args []string, stateDir string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: smallcloud <package|deploy|rollback|eval> [args]")
+		return errors.New("usage: smallcloud <init|package|deploy|rollback|status|budget|eval> [args]")
 	}
 
 	cmd := args[0]
+	if cmd == "init" {
+		return runInit(args[1:], stdout)
+	}
+
 	d := daemon.NewDaemon(filepath.Join(stateDir, "cgroups"), filepath.Join(stateDir, "replicas"))
+	statePath := filepath.Join(stateDir, "state.json")
+	if cmd != "eval" {
+		if err := d.LoadState(statePath); err != nil {
+			return err
+		}
+	}
 
 	switch cmd {
 	case "package":
@@ -189,9 +310,7 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(manifest)
+		return writeJSON(stdout, manifest)
 
 	case "deploy":
 		dir := "."
@@ -210,9 +329,10 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(res)
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, res)
 
 	case "rollback":
 		dir := "."
@@ -223,28 +343,39 @@ func Run(args []string, stateDir string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if _, err := d.Deploy(manifest.Config, "v1.0.0"); err != nil {
-			return err
-		}
-		if _, err := d.Deploy(manifest.Config, "v1.1.0"); err != nil {
-			return err
-		}
 		rolled, err := d.Rollback(manifest.Config.App.OrgID, manifest.Config.App.Name)
 		if err != nil {
 			return err
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(rolled)
+		if err := d.SaveState(statePath); err != nil {
+			return err
+		}
+		return writeJSON(stdout, rolled)
+
+	case "status":
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		cfg, err := config.LoadFile(filepath.Join(dir, "smallcloud.toml"))
+		if err != nil {
+			return err
+		}
+		st, err := d.Status(cfg.App.OrgID, cfg.App.Name)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, st)
+
+	case "budget":
+		return runBudget(args[1:], d, statePath, stdout)
 
 	case "eval":
 		report, err := RunEvalSuite(stateDir)
 		if err != nil {
 			return err
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(report); err != nil {
+		if err := writeJSON(stdout, report); err != nil {
 			return err
 		}
 		if !report.Passed {

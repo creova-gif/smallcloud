@@ -7,12 +7,20 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-var validSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]{1,62}$`)
+var (
+	validSlugRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]{1,62}$`)
+	validDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+)
+
+func IsValidSlug(s string) bool {
+	return validSlugRe.MatchString(s)
+}
 
 type Config struct {
 	App       AppConfig       `json:"app"`
@@ -58,6 +66,31 @@ func LoadFile(path string) (*Config, error) {
 	return Parse(f)
 }
 
+func stripCommentOutsideQuotes(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		if ch == '#' {
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return strings.TrimSpace(line)
+}
+
+func hasUnsafeCaddyToken(s string) bool {
+	return strings.ContainsAny(s, " \t\r\n\"'{};#")
+}
+
 func Parse(r io.Reader) (*Config, error) {
 	cfg := &Config{
 		App: AppConfig{
@@ -85,10 +118,7 @@ func Parse(r io.Reader) (*Config, error) {
 
 	for scanner.Scan() {
 		lineNum++
-		line := strings.TrimSpace(scanner.Text())
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
-		}
+		line := stripCommentOutsideQuotes(strings.TrimSpace(scanner.Text()))
 		if line == "" {
 			continue
 		}
@@ -226,20 +256,21 @@ func parseString(raw string) (string, error) {
 }
 
 func (c *Config) Validate() error {
-	if !validSlugRe.MatchString(c.App.Name) {
+	if !IsValidSlug(c.App.Name) {
 		return errors.New("app.name is required and must be a lowercase alphanumeric slug (2-63 chars)")
 	}
-	if !validSlugRe.MatchString(c.App.OrgID) {
+	if !IsValidSlug(c.App.OrgID) {
 		return errors.New("app.org_id is required for tenant scoping and must be a lowercase alphanumeric slug")
 	}
-	if strings.TrimSpace(c.App.Domain) == "" || strings.ContainsAny(c.App.Domain, " /\\") {
-		return errors.New("app.domain is required and must be a valid hostname")
+	domain := strings.ToLower(strings.TrimSpace(c.App.Domain))
+	if domain == "" || len(domain) > 253 || !validDomainRe.MatchString(domain) {
+		return errors.New("app.domain is required and must be a valid RFC-1123 hostname")
 	}
 	if c.App.Port < 1 || c.App.Port > 65535 {
 		return fmt.Errorf("app.port must be between 1 and 65535, got %d", c.App.Port)
 	}
-	if !strings.HasPrefix(c.App.Healthcheck, "/") {
-		return errors.New("app.healthcheck must start with '/'")
+	if !strings.HasPrefix(c.App.Healthcheck, "/") || hasUnsafeCaddyToken(c.App.Healthcheck) {
+		return errors.New("app.healthcheck must start with '/' and contain no whitespace or Caddyfile tokens")
 	}
 	if c.Resources.CPUMillicores < 100 || c.Resources.CPUMillicores > 16000 {
 		return fmt.Errorf("resources.cpu_millicores must be between 100 and 16000, got %d", c.Resources.CPUMillicores)
@@ -253,20 +284,22 @@ func (c *Config) Validate() error {
 	if c.Budget.MaxMonthlyUSD > 10000 {
 		return errors.New("budget.max_monthly_usd exceeds maximum allowed safety cap of 10000 USD")
 	}
-	if c.Budget.AlertAtPct <= 0 || c.Budget.AlertAtPct >= 100 {
+	if math.IsNaN(c.Budget.AlertAtPct) || math.IsInf(c.Budget.AlertAtPct, 0) || c.Budget.AlertAtPct <= 0 || c.Budget.AlertAtPct >= 100 {
 		return errors.New("budget.alert_at_pct must be between 0 and 100 (exclusive)")
 	}
 	if !c.Budget.HardStop {
 		return errors.New("budget.hard_stop cannot be disabled: SmallCloud requires 100% hard-stop enforcement at max_monthly_usd")
 	}
-	if strings.TrimSpace(c.Storage.SQLitePath) == "" || !strings.HasPrefix(c.Storage.SQLitePath, "/") {
-		return errors.New("storage.sqlite_path must be an absolute path")
+	sqlPath := strings.TrimSpace(c.Storage.SQLitePath)
+	if sqlPath == "" || !strings.HasPrefix(sqlPath, "/") || strings.Contains(sqlPath, "..") || filepath.Clean(sqlPath) != sqlPath {
+		return errors.New("storage.sqlite_path must be a clean absolute path without '..'")
 	}
-	if strings.TrimSpace(c.Storage.ReplicaURL) != "" {
-		if !strings.HasPrefix(c.Storage.ReplicaURL, "s3://") &&
-			!strings.HasPrefix(c.Storage.ReplicaURL, "gs://") &&
-			!strings.HasPrefix(c.Storage.ReplicaURL, "file://") {
-			return errors.New("storage.replica_url must use s3://, gs://, or file:// scheme")
+	replicaURL := strings.TrimSpace(c.Storage.ReplicaURL)
+	if replicaURL != "" {
+		if (!strings.HasPrefix(replicaURL, "s3://") &&
+			!strings.HasPrefix(replicaURL, "gs://") &&
+			!strings.HasPrefix(replicaURL, "file://")) || strings.ContainsAny(replicaURL, " \t\r\n\"'{};") {
+			return errors.New("storage.replica_url must use s3://, gs://, or file:// scheme with no unsafe characters")
 		}
 	}
 	if c.Storage.SyncMs < 50 || c.Storage.SyncMs > 60000 {

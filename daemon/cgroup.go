@@ -27,6 +27,9 @@ func NewCgroupManager(rootDir string) *CgroupManager {
 }
 
 func (m *CgroupManager) Apply(orgID, appName string, cpuMillicores, memoryMB int) (*CgroupLimits, error) {
+	if err := validateTenantSlugs(orgID, appName); err != nil {
+		return nil, err
+	}
 	if cpuMillicores < 100 {
 		return nil, fmt.Errorf("cpuMillicores must be >= 100, got %d", cpuMillicores)
 	}

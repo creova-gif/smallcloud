@@ -28,7 +28,7 @@ hard_stop = true
 
 [storage]
 sqlite_path = "/data/invoices.db"
-replica_url = "gs://smallcloud-replicas/org-indie-42/invoice-micro"
+replica_url = "file:///tmp/smallcloud-replicas/org#42/invoice" # inline comment
 sync_ms = 500
 `
 	cfg, err := Parse(strings.NewReader(raw))
@@ -50,7 +50,7 @@ sync_ms = 500
 	if cfg.Budget.MaxMonthlyUSD != 5.00 || !cfg.Budget.HardStop {
 		t.Errorf("unexpected budget: %+v", cfg.Budget)
 	}
-	if cfg.Storage.ReplicaURL != "gs://smallcloud-replicas/org-indie-42/invoice-micro" {
+	if cfg.Storage.ReplicaURL != "file:///tmp/smallcloud-replicas/org#42/invoice" {
 		t.Errorf("unexpected replica_url: %q", cfg.Storage.ReplicaURL)
 	}
 }
@@ -120,6 +120,45 @@ max_monthly_usd = 5.00
 replica_url = "http://insecure-bucket/db"
 `,
 			wantErr: "storage.replica_url must use s3://, gs://, or file:// scheme",
+		},
+		{
+			name: "caddyfile injection in healthcheck",
+			toml: `
+[app]
+name = "my-app"
+org_id = "org-1"
+domain = "my-app.smallcloud.dev"
+healthcheck = "/healthz } respond /pwn 200 {"
+[budget]
+max_monthly_usd = 5.00
+`,
+			wantErr: "Caddyfile tokens",
+		},
+		{
+			name: "invalid domain hostname",
+			toml: `
+[app]
+name = "my-app"
+org_id = "org-1"
+domain = "bad_host!.local"
+[budget]
+max_monthly_usd = 5.00
+`,
+			wantErr: "RFC-1123 hostname",
+		},
+		{
+			name: "path traversal in sqlite_path",
+			toml: `
+[app]
+name = "my-app"
+org_id = "org-1"
+domain = "my-app.smallcloud.dev"
+[budget]
+max_monthly_usd = 5.00
+[storage]
+sqlite_path = "/data/../../etc/passwd"
+`,
+			wantErr: "clean absolute path",
 		},
 	}
 
